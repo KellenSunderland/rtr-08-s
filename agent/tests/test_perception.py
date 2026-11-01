@@ -161,3 +161,27 @@ async def test_pickleball_state_snapshot_events(packs):
     await w.process_batch([Frame(JPEG, FrameMeta("cam", t, t, 1, 1)) for t in (0, 100)])
     assert [e.type for e in events] == ["point.won", "state.snapshot"]
     assert events[1].attrs["score"] == {"A": 0, "B": 1} and events[1].attrs["serving_team"] == "B"
+
+
+async def test_worker_collapses_repeats_and_updates_history(packs, store):
+    class Snap(list):  # snapshot on delivery: the worker mutates the first event in place
+        def append(self, e):
+            super().append(e.model_copy(deep=True))
+
+    events = Snap()
+    m = Metrics()
+    w = mkworker(packs, [tl(t * 100, "dog.sleeping") for t in range(12)], events, store, metrics=m)
+    frames = [Frame(JPEG, FrameMeta("cam", t * 100, 1000 + t * 100, 1, 1)) for t in range(12)]
+    for i in range(0, 12, 3):
+        await w.process_batch(frames[i : i + 3])
+    stored = store.events_in("cam", 0, 10_000)
+    assert len(stored) == 1 and stored[0].attrs["repeat_count"] == 12
+    assert stored[0].attrs["last_seen_wall_ms"] == 1_000 + 1_100
+    # first occurrence forwarded immediately, plus one update when repeat_count crossed 10
+    assert [e.id for e in events] == [stored[0].id] * 2
+    assert (
+        events[0].attrs["repeat_count"] == 3 and events[1].attrs["repeat_count"] == 12
+    )  # latest count at batch end
+    assert m.get("argus_events_collapsed_total", stream="cam", type="dog.sleeping") == 11
+    assert m.get("argus_event_updates_total", stream="cam") == 1
+    assert "argus_events_collapsed_total" in m.render()
