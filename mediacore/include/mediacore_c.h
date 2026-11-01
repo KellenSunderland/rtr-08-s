@@ -239,7 +239,8 @@ MC_API void mc_jitter_buffer_destroy(mc_jitter_buffer* jb);
 MC_API mc_status mc_jitter_buffer_push(mc_jitter_buffer* jb, uint32_t seq, int64_t ts_ns,
                                        const int16_t* samples, size_t n);
 /* Pop up to `cap` frames for playout. Returns silence for gaps. `*n` frames written;
- * `*ts_ns` (optional) timestamp of first sample. MC_ERR_EOF if not yet primed. */
+ * `*ts_ns` (optional) timestamp of first sample. MC_ERR_EOF if not yet primed (or, in
+ * adaptive mode, re-buffering after an underrun). */
 MC_API mc_status mc_jitter_buffer_pop(mc_jitter_buffer* jb, int16_t* out, size_t cap, size_t* n,
                                       int64_t* ts_ns);
 typedef struct mc_jitter_stats {
@@ -248,6 +249,24 @@ typedef struct mc_jitter_stats {
 } mc_jitter_stats;
 MC_API mc_status mc_jitter_buffer_stats(mc_jitter_buffer* jb, mc_jitter_stats* out);
 MC_API void mc_jitter_buffer_reset(mc_jitter_buffer* jb);
+
+/* Adaptive target delay. The target follows 4x the smoothed inter-arrival jitter, never below
+ * `min_target_ms` nor above the buffer's max delay, and is re-evaluated at most every
+ * `adapt_interval_ms` (0 = on every packet). While adaptive, an underrun re-primes the buffer
+ * at the current target. `min_target_ms` < 0 turns adaptation off. */
+MC_API mc_status mc_jitter_buffer_set_adaptive(mc_jitter_buffer* jb, int32_t min_target_ms,
+                                               int32_t adapt_interval_ms);
+/* Clock used to timestamp packet arrivals (monotonic ns). NULL restores the default. */
+typedef int64_t (*mc_clock_fn)(void* user);
+MC_API mc_status mc_jitter_buffer_set_clock(mc_jitter_buffer* jb, mc_clock_fn fn, void* user);
+typedef struct mc_jitter_adaptive_stats {
+    double jitter_ms;         /* smoothed inter-arrival jitter */
+    int32_t target_delay_ms;  /* current target */
+    uint64_t adjustments;     /* target changes */
+    uint64_t rebuffers;       /* underrun re-primes */
+    uint64_t overrun_drops;   /* packets dropped for exceeding max delay */
+} mc_jitter_adaptive_stats;
+MC_API mc_status mc_jitter_buffer_adaptive_stats(mc_jitter_buffer* jb, mc_jitter_adaptive_stats* out);
 
 /* ------------------------------------------------------------ capabilities */
 /* Extra (not in the original contract): 1 if built with OpenCV (video files, RTSP, devices,

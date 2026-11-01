@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -117,7 +118,18 @@ class Capture {
 };
 
 // ---------------------------------------------------------------- audio
-class AudioRing {
+// Shared drop accounting for the audio components. Callers hold their own lock.
+class DropAccounting {
+ public:
+  virtual ~DropAccounting() = default;
+  uint64_t dropped_total() const { return dropped_; }
+
+ protected:
+  virtual void on_drop(uint64_t n) { dropped_ += n; }
+  uint64_t dropped_ = 0;
+};
+
+class AudioRing : public DropAccounting {
  public:
   AudioRing(int32_t sample_rate, int32_t channels, size_t capacity_frames);
   void push(const int16_t* samples, size_t frames);
@@ -133,7 +145,6 @@ class AudioRing {
   std::vector<int16_t> buf_;
   size_t head_ = 0;  // in frames
   size_t size_ = 0;  // in frames
-  uint64_t dropped_ = 0;
 };
 
 size_t resample_required(size_t n_in, int32_t in_rate, int32_t out_rate);
@@ -161,14 +172,28 @@ class Vad {
   int32_t quiet_run_ = 0;
 };
 
-class JitterBuffer {
+class JitterBuffer : public DropAccounting {
  public:
+  using ClockFn = std::function<int64_t()>;
   JitterBuffer(int32_t sample_rate, int32_t target_delay_ms, int32_t max_delay_ms);
   void push(uint32_t seq, int64_t ts_ns, const int16_t* samples, size_t n);
   // Returns false when not primed.
   bool pop(int16_t* out, size_t cap, size_t* n, int64_t* ts_ns);
   mc_jitter_stats stats() const;
   void reset();
+
+  /**
+   * Enables adaptive target delay.
+   * @param min_target_ms     lower bound for the adaptive target
+   * @param max_target_ms     upper bound for the adaptive target
+   * @param adapt_interval_ms minimum time between re-evaluations
+   */
+  void set_adaptive(int32_t min_target_ms, int32_t adapt_interval_ms);
+  void set_clock(ClockFn fn);
+  mc_jitter_adaptive_stats adaptive_stats() const;
+
+ protected:
+  void on_drop(uint64_t n) override;
 
  private:
   struct Packet {
@@ -177,6 +202,8 @@ class JitterBuffer {
   };
   void reset_locked();
   size_t buffered_locked() const;
+  void note_arrival_locked(int64_t ts_ns);
+  void maybe_adapt_locked();
 
   mutable std::mutex mu_;
   int32_t rate_;
@@ -194,6 +221,20 @@ class JitterBuffer {
   int64_t play_ts_ = 0;
   bool have_ts_ = false;
   mc_jitter_stats st_{};
+
+  ClockFn clock_;
+  size_t configured_target_samples_ = 0;
+  bool adaptive_ = false;
+  size_t min_target_samples_ = 0;
+  int64_t adapt_interval_ns_ = 0;
+  int64_t last_adapt_ns_ = 0;
+  bool have_arrival_ = false;
+  int64_t last_arrival_ns_ = 0;
+  int64_t last_pkt_ts_ns_ = 0;
+  double jitter_ns_ = 0.0;
+  uint64_t drops_since_adapt_ = 0;
+  uint64_t adjustments_ = 0;
+  uint64_t rebuffers_ = 0;
 };
 
 }  // namespace mediacore
