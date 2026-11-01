@@ -334,6 +334,21 @@ mc_status mc_jitter_buffer_stats(mc_jitter_buffer* jb, mc_jitter_stats* out) {
 void mc_jitter_buffer_reset(mc_jitter_buffer* jb) {
   if (jb != nullptr) jb->impl.reset();
 }
+mc_status mc_jitter_buffer_set_adaptive(mc_jitter_buffer* jb, int32_t min_target_ms,
+                                        int32_t adapt_interval_ms) {
+  return guard([&] { need(jb, "jb")->impl.set_adaptive(min_target_ms, adapt_interval_ms); });
+}
+mc_status mc_jitter_buffer_set_clock(mc_jitter_buffer* jb, mc_clock_fn fn, void* user) {
+  return guard([&] {
+    need(jb, "jb")->impl.set_clock(fn == nullptr ? mediacore::JitterBuffer::ClockFn{}
+                                                 : mediacore::JitterBuffer::ClockFn([fn, user] {
+                                                     return fn(user);
+                                                   }));
+  });
+}
+mc_status mc_jitter_buffer_adaptive_stats(mc_jitter_buffer* jb, mc_jitter_adaptive_stats* out) {
+  return guard([&] { *need(out, "out") = need(jb, "jb")->impl.adaptive_stats(); });
+}
 
 int32_t mc_has_opencv(void) { return mediacore::has_opencv() ? 1 : 0; }
 

@@ -162,3 +162,96 @@ TEST(Jitter, ResetAndValidation) {
   EXPECT_EQ(mc_jitter_buffer_create(8000, 100, 50, &x), MC_ERR_INVALID_ARG);
   EXPECT_EQ(mc_jitter_buffer_push(jb.j, 0, 0, nullptr, 5), MC_ERR_INVALID_ARG);
 }
+
+namespace {
+int64_t g_now_ns = 0;
+int64_t fake_clock(void*) { return g_now_ns; }
+
+mc_jitter_adaptive_stats adaptive(Jb& b) {
+  mc_jitter_adaptive_stats s{};
+  EXPECT_EQ(mc_jitter_buffer_adaptive_stats(b.j, &s), MC_OK);
+  return s;
+}
+}  // namespace
+
+TEST(JitterAdaptive, TargetFollowsArrivalJitter) {
+  Jb b(30, 500);
+  ASSERT_EQ(mc_jitter_buffer_set_clock(b.j, fake_clock, nullptr), MC_OK);
+  ASSERT_EQ(mc_jitter_buffer_set_adaptive(b.j, 10, 0), MC_OK);
+  for (int i = 0; i < 80; ++i) {
+    g_now_ns = i * 10'000'000LL + (i % 2) * 5'000'000LL;  // +-5 ms of arrival jitter
+    ASSERT_EQ(b.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+    if (i % 4 == 3) b.pop(kPkt * 4);
+  }
+  const auto s = adaptive(b);
+  EXPECT_GT(s.jitter_ms, 4.0);
+  EXPECT_LT(s.jitter_ms, 5.5);
+  EXPECT_GE(s.target_delay_ms, 25);  // 10 ms floor + 4 * jitter
+  EXPECT_LE(s.target_delay_ms, 32);
+  EXPECT_GT(s.adjustments, 0u);
+}
+
+TEST(JitterAdaptive, OffByDefaultAndClampedToMax) {
+  Jb b(30, 60);
+  for (int i = 0; i < 20; ++i) ASSERT_EQ(b.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+  EXPECT_EQ(adaptive(b).target_delay_ms, 30);
+  EXPECT_EQ(adaptive(b).adjustments, 0u);
+  Jb c(30, 60);
+  ASSERT_EQ(mc_jitter_buffer_set_clock(c.j, fake_clock, nullptr), MC_OK);
+  ASSERT_EQ(mc_jitter_buffer_set_adaptive(c.j, 10, 0), MC_OK);
+  for (int i = 0; i < 200; ++i) {
+    g_now_ns = i * 10'000'000LL + (i % 2) * 200'000'000LL;  // wild jitter
+    ASSERT_EQ(c.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+    if (i % 4 == 3) c.pop(kPkt * 4);
+  }
+  EXPECT_EQ(adaptive(c).target_delay_ms, 60);
+}
+
+TEST(JitterAdaptive, AdaptIntervalLimitsReevaluation) {
+  Jb b(30, 500);
+  ASSERT_EQ(mc_jitter_buffer_set_clock(b.j, fake_clock, nullptr), MC_OK);
+  ASSERT_EQ(mc_jitter_buffer_set_adaptive(b.j, 10, 3600 * 1000), MC_OK);
+  for (int i = 0; i < 40; ++i) {
+    g_now_ns = i * 10'000'000LL + (i % 2) * 5'000'000LL;
+    ASSERT_EQ(b.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+  }
+  EXPECT_EQ(adaptive(b).adjustments, 1u);  // only the first evaluation ran
+  EXPECT_EQ(adaptive(b).target_delay_ms, 10);
+}
+
+TEST(JitterAdaptive, UnderrunRebuffers) {
+  Jb b(30, 500);
+  ASSERT_EQ(mc_jitter_buffer_set_clock(b.j, fake_clock, nullptr), MC_OK);
+  ASSERT_EQ(mc_jitter_buffer_set_adaptive(b.j, 30, 0), MC_OK);
+  for (int i = 0; i < 3; ++i) {
+    g_now_ns = i * 10'000'000LL;
+    ASSERT_EQ(b.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+  }
+  mc_status st = MC_OK;
+  EXPECT_EQ(b.pop(kPkt * 3, &st).size(), kPkt * 3);
+  EXPECT_EQ(st, MC_OK);
+  EXPECT_EQ(b.pop(kPkt, &st).size(), 0u);  // underrun
+  EXPECT_EQ(st, MC_OK);
+  b.pop(kPkt, &st);
+  EXPECT_EQ(st, MC_ERR_EOF);  // re-priming
+  EXPECT_EQ(adaptive(b).rebuffers, 1u);
+  for (int i = 3; i < 6; ++i) {
+    g_now_ns = i * 10'000'000LL;
+    ASSERT_EQ(b.push(static_cast<uint32_t>(i), 2, i), MC_OK);
+  }
+  EXPECT_EQ(blocks(b.pop(kPkt * 3, &st)), (std::vector<int16_t>{2, 2, 2}));
+  EXPECT_EQ(st, MC_OK);
+}
+
+TEST(JitterAdaptive, OverrunDropsAndValidation) {
+  Jb b(20, 40);
+  for (int i = 0; i < 10; ++i) ASSERT_EQ(b.push(static_cast<uint32_t>(i), 1, i), MC_OK);
+  EXPECT_EQ(adaptive(b).overrun_drops, b.stats().lost);
+  EXPECT_GT(adaptive(b).overrun_drops, 0u);
+  EXPECT_EQ(mc_jitter_buffer_set_adaptive(b.j, 100, 0), MC_ERR_INVALID_ARG);  // above max delay
+  EXPECT_EQ(mc_jitter_buffer_set_adaptive(b.j, 10, -1), MC_ERR_INVALID_ARG);
+  EXPECT_EQ(mc_jitter_buffer_set_adaptive(nullptr, 10, 0), MC_ERR_INVALID_ARG);
+  EXPECT_EQ(mc_jitter_buffer_adaptive_stats(b.j, nullptr), MC_ERR_INVALID_ARG);
+  mc_jitter_buffer_reset(b.j);
+  EXPECT_EQ(adaptive(b).overrun_drops, 0u);
+}
