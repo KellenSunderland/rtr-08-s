@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { SceneEvent } from "@argus/protocol";
 import { Transcript } from "./Transcript";
 import { Scoreboard } from "./Scoreboard";
+import { Timeline } from "./Timeline";
 
 describe("Transcript", () => {
   it("renders hostile text as inert text, not HTML", () => {
@@ -33,5 +34,34 @@ describe("Scoreboard", () => {
     render(<Scoreboard events={[e(1, "rally.start"), e(2, "point.won", "a"), e(3, "point.won", "a")]} />);
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getByText(/rallies: 1/)).toBeInTheDocument();
+  });
+});
+
+describe("Timeline", () => {
+  const NOW = 1_700_000_000_000;
+  const e = (i: number, wall_ms: number): SceneEvent => ({
+    id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    stream_id: "c",
+    ts_ms: i,
+    wall_ms,
+    type: "a.b",
+    confidence: 1,
+    actors: [],
+    attrs: {},
+    summary: "",
+    scenario: "s",
+  });
+  it("switches zoom level and re-renders the heat strip", () => {
+    const events = [e(1, NOW - 10_000), e(2, NOW - 12_000), e(3, NOW - 40 * 60_000)];
+    const { container } = render(
+      <Timeline events={events} summaries={[]} nowMs={NOW} seekTs={null} onSeek={() => {}} />,
+    );
+    expect(screen.getByText(/last 1h/)).toBeInTheDocument();
+    expect(container.querySelectorAll(".heat .cell")).toHaveLength(30);
+    expect(container.querySelectorAll(".heat .cell.h4")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "15m" }));
+    expect(screen.getByText(/last 15m/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "15m" })).toHaveAttribute("aria-pressed", "true");
+    expect(container.querySelectorAll(".heat .cell:not(.h0)")).toHaveLength(1);
   });
 });
