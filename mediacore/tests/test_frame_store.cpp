@@ -25,6 +25,11 @@ struct Store {
     EXPECT_EQ(mc_frame_store_stats_get(s, &st), MC_OK);
     return st;
   }
+  mc_stream_stats stream_stats(uint32_t stream, int64_t now, int64_t window) {
+    mc_stream_stats st{};
+    EXPECT_EQ(mc_frame_store_stream_stats(s, stream, now, window, &st), MC_OK);
+    return st;
+  }
   std::vector<int64_t> range(uint32_t stream, int64_t from, int64_t to, size_t* total = nullptr) {
     std::vector<mc_frame_view> v(1000);
     size_t n = 0;
@@ -247,4 +252,62 @@ TEST(FrameStore, ConcurrentPushAndRead) {
   for (auto& t : th) t.join();
   EXPECT_EQ(st.stats().frames, 1200u);
   EXPECT_EQ(st.stats().streams, 4u);
+}
+
+TEST(FrameStore, StreamStatsBasics) {
+  Store st(cfg(1000, 1000000, 10, 1 << 20));
+  mc_stream_stats unused{};
+  EXPECT_EQ(mc_frame_store_stream_stats(st.s, 3, 0, 0, &unused), MC_ERR_NOT_FOUND);
+  EXPECT_EQ(mc_frame_store_stream_stats(st.s, 3, 0, 0, nullptr), MC_ERR_INVALID_ARG);
+  for (int64_t t = 100; t <= 500; t += 100) ASSERT_EQ(st.push(1, t), MC_OK);
+  ASSERT_EQ(st.push(2, 50), MC_OK);
+  auto a = st.stream_stats(1, 600, 300);
+  EXPECT_EQ(a.frames, 5u);
+  EXPECT_EQ(a.bytes, 5 * kFrameBytes);
+  EXPECT_EQ(a.oldest_ts_ns, 100);
+  EXPECT_EQ(a.newest_ts_ns, 500);
+  EXPECT_EQ(a.window_frames, 3u);  // [300, 600): 300, 400, 500
+  EXPECT_EQ(a.leased_frames, 0u);
+  auto b = st.stream_stats(2, 600, 300);
+  EXPECT_EQ(b.frames, 1u);
+  EXPECT_EQ(b.window_frames, 0u);
+  EXPECT_EQ(b.store_queries, a.store_queries + 1);
+}
+
+TEST(FrameStore, StreamStatsWindowIsHalfOpen) {
+  Store st;
+  for (int64_t t = 100; t <= 500; t += 100) ASSERT_EQ(st.push(1, t), MC_OK);
+  EXPECT_EQ(st.stream_stats(1, 400, 200).window_frames, 2u);  // 200, 300
+  EXPECT_EQ(st.stream_stats(1, 1000, 100).window_frames, 0u);
+  EXPECT_EQ(st.stream_stats(1, 501, 1000).window_frames, 5u);
+}
+
+TEST(FrameStore, StreamStatsCountersAndLeases) {
+  Store st(cfg(1000, 1000000, 10, 3 * kFrameBytes));
+  for (int64_t t : {100, 200, 300, 400}) ASSERT_EQ(st.push(1, t), MC_OK);  // 100 evicted by cap
+  ASSERT_EQ(st.push(2, 450), MC_OK);                                        // 200 evicted
+  auto s1 = st.stream_stats(1, 500, 100);
+  EXPECT_EQ(s1.frames, 2u);
+  EXPECT_EQ(s1.evicted_total, 2u);
+  EXPECT_EQ(st.stream_stats(2, 500, 100).evicted_total, 0u);
+  mc_frame_view lease{};
+  ASSERT_EQ(mc_frame_store_latest(st.s, 1, &lease), MC_OK);
+  EXPECT_EQ(st.stream_stats(1, 500, 100).leased_frames, 1u);
+  // Retention cut at 1700 - 1000 = 700 covers every frame; the leased one is only "expiring".
+  EXPECT_EQ(st.stream_stats(1, 1700, 100).expiring_frames, 2u);
+  ASSERT_EQ(mc_frame_store_prune(st.s, 1700), MC_OK);
+  auto s2 = st.stream_stats(1, 1700, 100);
+  EXPECT_EQ(s2.frames, 1u);
+  EXPECT_EQ(s2.evicted_total, 3u);
+  mc_frame_view_release(&lease);
+}
+
+TEST(FrameStore, StreamStatsThinnedPerStream) {
+  Store st(cfg(1000000, 1000, 100, 1 << 20));
+  for (int64_t t = 0; t < 300; t += 30) ASSERT_EQ(st.push(1, t), MC_OK);
+  ASSERT_EQ(st.push(2, 5), MC_OK);
+  ASSERT_EQ(mc_frame_store_prune(st.s, 10000), MC_OK);
+  EXPECT_EQ(st.stream_stats(1, 10000, 100).thinned_total, 6u);
+  EXPECT_EQ(st.stream_stats(2, 10000, 100).thinned_total, 0u);
+  EXPECT_EQ(st.stats().thinned_total, 6u);
 }

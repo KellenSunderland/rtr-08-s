@@ -11,6 +11,35 @@ int64_t sat_sub(int64_t a, int64_t b) {
   if (b > 0 && a < std::numeric_limits<int64_t>::min() + b) return std::numeric_limits<int64_t>::min();
   return a - b;
 }
+
+using FrameDeque = std::deque<std::shared_ptr<StoredFrame>>;
+
+// Iterators over the frames with from <= ts_ns < to.
+std::pair<FrameDeque::const_iterator, FrameDeque::const_iterator> bounds_in(const FrameDeque& fr,
+                                                                            int64_t from,
+                                                                            int64_t to) {
+  auto before = [](const std::shared_ptr<StoredFrame>& p, int64_t t) { return p->frame.ts_ns < t; };
+  auto lo = std::lower_bound(fr.begin(), fr.end(), from, before);
+  auto hi = std::lower_bound(lo, fr.end(), to, before);
+  return {lo, hi};
+}
+
+__int128 boundary_distance(int64_t ts, int64_t iv) {
+  const __int128 v = static_cast<__int128>(ts) + iv / 2;
+  __int128 q = v / iv;
+  if (v % iv != 0 && v < 0) --q;
+  const __int128 d = static_cast<__int128>(ts) - q * iv;
+  return d < 0 ? -d : d;
+}
+
+// Index in [i, j) of the frame closest to the interval boundary (ties -> earlier).
+size_t pick_keeper(const FrameDeque& fr, size_t i, size_t j, int64_t iv) {
+  size_t win = i;
+  for (size_t k = i + 1; k < j; ++k)
+    if (boundary_distance(fr[k]->frame.ts_ns, iv) <= boundary_distance(fr[win]->frame.ts_ns, iv))
+      win = k;
+  return win;
+}
 }  // namespace
 
 FrameStore::FrameStore(const mc_frame_store_config& cfg) : cfg_(cfg) {
@@ -67,6 +96,7 @@ void FrameStore::evict_to_cap_locked() {
     if (best == nullptr) return;  // everything remaining is leased
     bytes_ -= best->frames[best_idx]->bytes;
     best->frames.erase(best->frames.begin() + static_cast<std::ptrdiff_t>(best_idx));
+    ++best->evicted;
     ++evicted_;
   }
 }
@@ -118,14 +148,7 @@ std::vector<FramePtr> FrameStore::range(uint32_t id, int64_t from, int64_t to, s
     auto it = streams_.find(id);
     if (it != streams_.end() && from < to) {
       const auto& fr = it->second.frames;
-      auto lo = std::lower_bound(fr.begin(), fr.end(), from,
-                                 [](const std::shared_ptr<StoredFrame>& p, int64_t t) {
-                                   return p->frame.ts_ns < t;
-                                 });
-      auto hi = std::lower_bound(lo, fr.end(), to,
-                                 [](const std::shared_ptr<StoredFrame>& p, int64_t t) {
-                                   return p->frame.ts_ns < t;
-                                 });
+      const auto [lo, hi] = bounds_in(fr, from, to);
       matched = static_cast<size_t>(hi - lo);
       const size_t take = std::min(matched, cap);
       out.reserve(take);
@@ -148,6 +171,7 @@ void FrameStore::prune(int64_t now_ns) {
     for (auto& p : fr) {
       if (p->frame.ts_ns < retention_cut && !leased(p)) {
         bytes_ -= p->bytes;
+        ++s.evicted;
         ++evicted_;
       } else {
         kept.push_back(std::move(p));
@@ -165,10 +189,6 @@ void FrameStore::prune(int64_t now_ns) {
       if (v % iv != 0 && v < 0) --q;
       return q;
     };
-    auto boundary_dist = [iv, &bucket_of](int64_t ts) {
-      const __int128 d = static_cast<__int128>(ts) - bucket_of(ts) * iv;
-      return d < 0 ? -d : d;
-    };
     while (i < fr.size()) {
       if (fr[i]->frame.ts_ns >= thin_cut) {
         out.push_back(std::move(fr[i]));
@@ -177,16 +197,15 @@ void FrameStore::prune(int64_t now_ns) {
       }
       const __int128 b = bucket_of(fr[i]->frame.ts_ns);
       size_t j = i;
-      size_t win = i;
-      while (j < fr.size() && fr[j]->frame.ts_ns < thin_cut && bucket_of(fr[j]->frame.ts_ns) == b) {
-        if (boundary_dist(fr[j]->frame.ts_ns) < boundary_dist(fr[win]->frame.ts_ns)) win = j;
+      while (j < fr.size() && fr[j]->frame.ts_ns < thin_cut && bucket_of(fr[j]->frame.ts_ns) == b)
         ++j;
-      }
+      const size_t win = pick_keeper(fr, i, j, iv);
       for (size_t k = i; k < j; ++k) {
         if (k == win || leased(fr[k])) {
           out.push_back(std::move(fr[k]));
         } else {
           bytes_ -= fr[k]->bytes;
+          ++s.thinned;
           ++thinned_;
         }
       }
@@ -221,6 +240,41 @@ mc_frame_store_stats FrameStore::stats() const {
   st.bytes = bytes_;
   st.evicted_total = evicted_;
   st.thinned_total = thinned_;
+  return st;
+}
+
+mc_stream_stats FrameStore::stream_stats(uint32_t id, int64_t now_ns, int64_t window_ns) const {
+  stats_queries_.fetch_add(1, std::memory_order_relaxed);
+  const Stream* s = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = streams_.find(id);
+    if (it != streams_.end()) s = &it->second;
+  }
+  if (s == nullptr) fail(MC_ERR_NOT_FOUND, "unknown stream");
+
+  mc_stream_stats st{};
+  const auto& fr = s->frames;
+  st.frames = fr.size();
+  for (const auto& p : fr) {
+    st.bytes += p->bytes;
+    if (leased(p)) ++st.leased_frames;
+  }
+  if (!fr.empty()) {
+    st.oldest_ts_ns = fr.front()->frame.ts_ns;
+    st.newest_ts_ns = fr.back()->frame.ts_ns;
+  }
+  const auto [wlo, whi] = bounds_in(fr, sat_sub(now_ns, window_ns), now_ns);
+  st.window_frames = static_cast<size_t>(whi - wlo);
+  const int64_t cut = sat_sub(now_ns, cfg_.retention_ns);
+  auto expired = std::upper_bound(fr.begin(), fr.end(), cut,
+                                  [](int64_t t, const std::shared_ptr<StoredFrame>& p) {
+                                    return t < p->frame.ts_ns;
+                                  });
+  st.expiring_frames = static_cast<size_t>(expired - fr.begin());
+  st.evicted_total = s->evicted;
+  st.thinned_total = s->thinned;
+  st.store_queries = stats_queries_.load(std::memory_order_relaxed);
   return st;
 }
 
