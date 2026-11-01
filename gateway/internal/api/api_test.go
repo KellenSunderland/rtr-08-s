@@ -253,6 +253,44 @@ func TestClipExportBounds(t *testing.T) {
 	}
 }
 
+func TestClipFormats(t *testing.T) {
+	e := newEnv(t)
+	e.addStream("cam1", "fake://32x24@20", tokA)
+	e.waitFrames("cam1", 30)
+	resp := e.do("GET", "/v1/streams/cam1/frame", tokA, nil)
+	e.mustStatus(resp, 200)
+	latest, _ := strconv.ParseInt(resp.Header.Get("X-Frame-Ts-Ms"), 10, 64)
+	from := max(latest-1000, 0)
+	q := "/v1/streams/cam1/clip?from_ms=" + strconv.FormatInt(from, 10) + "&to_ms=" + strconv.FormatInt(latest+1, 10) + "&fps=4&format="
+
+	e.mustStatus(e.do("GET", q+"gif", tokA, nil), 400)
+
+	var idx struct {
+		Frames []struct {
+			TsMs int64 `json:"ts_ms"`
+		} `json:"frames"`
+	}
+	resp = e.do("GET", q+"json", tokA, nil)
+	if err := json.Unmarshal(e.mustStatus(resp, 200), &idx); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(idx.Frames); n < 3 || n > 6 {
+		t.Fatalf("json index has %d frames", n)
+	}
+
+	resp = e.do("GET", q+"mjpeg", tokA, nil)
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "multipart/x-mixed-replace") {
+		t.Fatalf("content-type %q", ct)
+	}
+	body := e.mustStatus(resp, 200)
+	if parts := bytes.Count(body, []byte("--"+mjpegBoundary+"\r\n")); parts != len(idx.Frames) {
+		t.Fatalf("mjpeg parts=%d, json frames=%d", parts, len(idx.Frames))
+	}
+	if !bytes.Contains(body, []byte("Content-Type: image/jpeg\r\n")) || !bytes.Contains(body, []byte{0xFF, 0xD8}) {
+		t.Fatal("mjpeg body has no jpeg part")
+	}
+}
+
 func TestSessionCRUDAndQuota(t *testing.T) {
 	e := newEnv(t)
 	e.addStream("cam1", "fake://16x16@10", tokA)
