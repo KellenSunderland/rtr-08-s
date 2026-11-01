@@ -1,7 +1,7 @@
 import type { SceneEvent } from "@argus/protocol";
 
 export interface Scoreboard {
-  /** Points per side/team label (normalized lower-case; "unknown" if the event names none). */
+  /** Points per side/team label (normalized to upper-case, e.g. "A"; "unknown" if the event names none). */
   scores: Record<string, number>;
   rallies: number;
   rallyActive: boolean;
@@ -11,6 +11,10 @@ export interface Scoreboard {
 
 export const emptyScoreboard: Scoreboard = { scores: {}, rallies: 0, rallyActive: false };
 
+/**
+ * Label of the side an event names: the first of `attrs.team`, `winner`, `side` or `player` that is a
+ * non-empty string (trimmed, upper-cased) or a number. Returns "unknown" when none is present.
+ */
 export function winnerOf(e: Pick<SceneEvent, "attrs">): string {
   const a = e.attrs;
   for (const k of ["team", "winner", "side", "player"]) {
@@ -21,7 +25,7 @@ export function winnerOf(e: Pick<SceneEvent, "attrs">): string {
   return "unknown";
 }
 
-/** Fold one event. Pure; unrelated event types are ignored. */
+/** Fold one event into the scoreboard. Pure: returns a new value, and event types it does not score are ignored. */
 export function applyScoreEvent(s: Scoreboard, e: SceneEvent): Scoreboard {
   if (e.type === "rally.start") return { ...s, rallies: s.rallies + 1, rallyActive: true };
   if (e.type === "point.won") {
@@ -37,7 +41,7 @@ export function applyScoreEvent(s: Scoreboard, e: SceneEvent): Scoreboard {
   return s;
 }
 
-/** Reduce events in ts order, de-duplicating by id (history seeding + live may overlap). */
+/** Reduce events in `ts_ms` order, de-duplicating by id (history seeding and live events may overlap). */
 export function reduceScoreboard(events: readonly SceneEvent[]): Scoreboard {
   const seen = new Set<string>();
   return [...events]

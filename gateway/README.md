@@ -7,8 +7,9 @@ Go service: stream registry + frame store (mediacore via cgo, or a pure-Go fake)
     make build-mediacore      # real mediacore (-tags mediacore), needs ../mediacore/build
 
 ## Config (`gateway.yaml`, see `gateway.example.yaml`)
-Flags: `-config`, `-listen`, `-log-level`. Bearer tokens carry quotas (`max_streams`, `max_sessions`).
-`internal_token` guards `/internal/*` (loopback only). Tokens may also be passed as `?token=` (WebSockets).
+Flags: `-config`, `-listen`, `-log-level`. Each bearer token carries its own quotas (`max_streams`,
+`max_sessions`). `internal_token` guards `/internal/*`, which is reachable from loopback only.
+Browsers cannot set headers on a WebSocket handshake, so tokens may also be passed as `?token=`.
 
 ## Walkthrough
     T=dev-token-change-me; H="Authorization: Bearer $T"
