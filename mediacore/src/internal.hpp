@@ -1,6 +1,7 @@
 // Internal C++ interfaces for mediacore. Not installed.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -83,10 +84,14 @@ class FrameStore {
   void prune(int64_t now_ns);
   void remove_stream(uint32_t stream_id);
   mc_frame_store_stats stats() const;
+  // Throws MC_ERR_NOT_FOUND for an unknown stream.
+  mc_stream_stats stream_stats(uint32_t stream_id, int64_t now_ns, int64_t window_ns) const;
 
  private:
   struct Stream {
     std::deque<std::shared_ptr<StoredFrame>> frames;
+    uint64_t evicted = 0;
+    uint64_t thinned = 0;
     int64_t last_ts = 0;
     bool has_last = false;
   };
@@ -99,6 +104,7 @@ class FrameStore {
   size_t bytes_ = 0;
   uint64_t evicted_ = 0;
   uint64_t thinned_ = 0;
+  mutable std::atomic<uint64_t> stats_queries_{0};
 };
 
 // ---------------------------------------------------------------- capture
