@@ -40,6 +40,9 @@ sampling:
   min_motion: 0.02                            # forwarded to gateway /internal/frames
   max_interval_ms: 5000
   batch_frames: 3                             # frames per VisionModel.observe call
+  event_cooldown_s: 30                        # same-type events within this window collapse into the first (0 = off)
+  cooldowns: { dog.sleeping: 120 }            # per-type override of event_cooldown_s
+  max_events_per_minute: 60                   # per-stream cap; lowest-confidence events dropped first
 compaction:
   minute_summary_prompt: |
     Summarize these events in one sentence...
@@ -76,4 +79,6 @@ with core tools: `search_history`, `what_happened`, `describe_now`.
 - `name` matches `^[a-z][a-z0-9_]*$` and equals the directory name.
 - `event_types[].type` unique, matches `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
 - A VisionModel observation whose `event_type` is not in the taxonomy (and not `none`) is dropped and counted in metrics.
+- Collapsed duplicates update the first event's `attrs.repeat_count` / `attrs.last_seen_wall_ms`; `state.snapshot`
+  and `severity: high` types are never collapsed or capped. `cooldowns` keys must be declared types.
 - `attrs` returned by the model are filtered to declared keys.

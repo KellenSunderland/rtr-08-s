@@ -148,6 +148,9 @@ def load_pack(path: str | Path) -> Pack:
             float(s.get("min_motion", 0.02)),
             int(s.get("max_interval_ms", 5000)),
             int(s.get("batch_frames", 3)),
+            float(s.get("event_cooldown_s", 30.0)),
+            {str(k): float(v) for k, v in (s.get("cooldowns") or {}).items()},
+            int(s.get("max_events_per_minute", 60)),
         )
     except (TypeError, ValueError) as e:
         raise PackError(f"invalid sampling: {e}") from e
@@ -157,6 +160,12 @@ def load_pack(path: str | Path) -> Pack:
         or not (1 <= sampling.batch_frames <= 16)
     ):
         raise PackError("sampling out of range (min_motion 0..1, max_interval_ms>=1, batch_frames 1..16)")
+    if (
+        sampling.event_cooldown_s < 0
+        or sampling.max_events_per_minute < 1
+        or any(v < 0 or k not in types for k, v in sampling.cooldowns.items())
+    ):
+        raise PackError("sampling cooldowns must be >= 0 for declared types; max_events_per_minute >= 1")
     comp = raw.get("compaction") or {}
     minute_prompt = str(comp.get("minute_summary_prompt") or "Summarize these events in one sentence.")
 

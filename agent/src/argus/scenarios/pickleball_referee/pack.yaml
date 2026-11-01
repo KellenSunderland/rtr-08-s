@@ -40,6 +40,7 @@ sampling:
   min_motion: 0.01
   max_interval_ms: 2000
   batch_frames: 3
+  event_cooldown_s: 0                         # each rally event is distinct; never collapse
 compaction:
   minute_summary_prompt: |
     Summarize these pickleball events in one sentence: points won, faults, and the score trend.
