@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { SceneEvent } from "@argus/protocol";
 import {
   MAX_EVENTS,
+  STRIP_CELLS,
   bucketByMinute,
+  densityStrip,
   filterByType,
   formatClock,
   fromFraction,
+  heatLevel,
   inWindow,
   lastHour,
+  loadDensityCache,
   mergeEvents,
   toFraction,
+  zoomWindow,
 } from "./timeline";
 
 const ev = (i: number, ts_ms: number, type = "a.b"): SceneEvent => ({
@@ -89,4 +94,51 @@ describe("event list helpers", () => {
     expect(m.at(-1)!.ts_ms).toBe(MAX_EVENTS + 4);
   });
   it("formatClock", () => expect(formatClock(125_000)).toBe("02:05"));
+});
+
+describe("zoom levels", () => {
+  it("windows trail now by the zoom span", () => {
+    const now = 10_000_000;
+    expect(zoomWindow(now, "15m")).toEqual({ startMs: now - 900_000, endMs: now });
+    expect(zoomWindow(now, "30m")).toEqual({ startMs: now - 1_800_000, endMs: now });
+    expect(zoomWindow(now, "1h")).toEqual(lastHour(now));
+  });
+  it("clamps at zero like lastHour", () =>
+    expect(zoomWindow(5_000, "15m")).toEqual({ startMs: 0, endMs: 5_000 }));
+});
+
+describe("densityStrip", () => {
+  const w = { startMs: 0, endMs: 900_000 }; // 30 cells of 30 s
+  it("has a fixed number of cells and an empty window yields zeros", () => {
+    expect(densityStrip([], w)).toHaveLength(STRIP_CELLS);
+    expect(densityStrip([ev(1, 5)], { startMs: 5, endMs: 5 }).every((c) => c === 0)).toBe(true);
+  });
+  it("counts events into the cell that contains them", () => {
+    const c = densityStrip([ev(1, 10_000), ev(2, 20_000), ev(3, 455_000), ev(4, 899_000)], w);
+    expect(c[0]).toBe(2);
+    expect(c[15]).toBe(1);
+    expect(c[29]).toBe(1);
+    expect(c.reduce((a, b) => a + b, 0)).toBe(4);
+  });
+  it("ignores events outside the window", () => {
+    expect(densityStrip([ev(1, 900_001)], w).every((c) => c === 0)).toBe(true);
+    expect(densityStrip([ev(1, 100_000)], { startMs: 200_000, endMs: 1_100_000 }).every((c) => c === 0)).toBe(
+      true,
+    );
+  });
+  it("heat levels span 0..4", () => {
+    expect(heatLevel(0, 10)).toBe(0);
+    expect(heatLevel(1, 10)).toBe(1);
+    expect(heatLevel(10, 10)).toBe(4);
+    expect(heatLevel(3, 0)).toBe(0);
+  });
+});
+
+describe("density cache", () => {
+  const store = (raw: string | null) => ({ getItem: () => raw });
+  it("round-trips a valid snapshot", () => {
+    const snap = { zoom: "30m", endMs: 5, counts: [1, 2] };
+    expect(loadDensityCache(store(JSON.stringify(snap)))).toEqual(snap);
+  });
+  it("returns null when absent", () => expect(loadDensityCache(store(null))).toBeNull());
 });
