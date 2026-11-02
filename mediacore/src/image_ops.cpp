@@ -1,6 +1,7 @@
 // Dependency-free image operations (identical in OpenCV and non-OpenCV builds).
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "internal.hpp"
@@ -202,6 +203,57 @@ void crop(const mc_frame* in, int32_t x, int32_t y, int32_t w, int32_t h, mc_fra
   for (int32_t r = 0; r < h; ++r)
     std::memcpy(tmp.data + static_cast<size_t>(r) * static_cast<size_t>(tmp.stride),
                 row_ptr(in, y + r) + static_cast<size_t>(x) * bpp, static_cast<size_t>(w) * bpp);
+  *out = tmp;
+}
+
+void crop_letterbox(const mc_frame* in, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int32_t w,
+                    int32_t h, uint8_t pad, mc_frame* out) {
+  validate_frame(in, "crop_letterbox");
+  if (out == nullptr) fail(MC_ERR_INVALID_ARG, "null out");
+  if (cx < 0 || cy < 0 || cw <= 0 || ch <= 0 || static_cast<int64_t>(cx) + cw > in->width ||
+      static_cast<int64_t>(cy) + ch > in->height)
+    fail(MC_ERR_INVALID_ARG, "crop region outside frame");
+  if (w <= 0 || h <= 0) fail(MC_ERR_INVALID_ARG, "invalid target size");
+
+  const int32_t bpp = pixfmt_bpp(in->fmt);
+  const size_t pb = static_cast<size_t>(bpp);
+  const size_t bytes = static_cast<size_t>(w * h * bpp);
+  if (bytes > kMaxFrameBytes) fail(MC_ERR_INVALID_ARG, "target frame too large");
+
+  const double scale = std::min(static_cast<double>(w) / cw, static_cast<double>(h) / ch);
+  const int32_t nw = std::clamp(static_cast<int32_t>(std::lround(cw * scale)), 1, w);
+  const int32_t nh = std::clamp(static_cast<int32_t>(std::lround(ch * scale)), 1, h);
+  const int32_t ox = (w - nw) / 2;
+  const int32_t oy = (h - nh) / 2;
+
+  // Source column (relative to the crop) for each destination column.
+  std::vector<int32_t> xs(static_cast<size_t>(nw));
+  for (int32_t dx = 0; dx < nw; ++dx)
+    xs[static_cast<size_t>(dx)] =
+        static_cast<int32_t>((static_cast<int64_t>(dx) * cw + nw / 2) / nw);
+
+  auto* data = static_cast<uint8_t*>(std::malloc(bytes));
+  if (data == nullptr) fail(MC_ERR_INTERNAL, "out of memory");
+  std::memset(data, pad, bytes);
+  const size_t stride = static_cast<size_t>(w) * pb;
+  for (int32_t dy = 0; dy < nh; ++dy) {
+    const int32_t sy = cy + static_cast<int32_t>((static_cast<int64_t>(dy) * ch + nh / 2) / nh);
+    const uint8_t* src = row_ptr(in, sy);
+    uint8_t* dst = data + static_cast<size_t>(dy + oy) * stride + static_cast<size_t>(ox) * pb;
+    for (int32_t dx = 0; dx < nw; ++dx)
+      std::memcpy(dst + static_cast<size_t>(dx) * pb,
+                  src + static_cast<size_t>(cx + xs[static_cast<size_t>(dx)]) * pb, pb);
+  }
+  mc_frame tmp{};
+  tmp.data = data;
+  tmp.width = w;
+  tmp.height = h;
+  tmp.stride = static_cast<int32_t>(stride);
+  tmp.fmt = in->fmt;
+  tmp.ts_ns = in->ts_ns;
+  tmp.wall_ns = in->wall_ns;
+  tmp.stream_id = in->stream_id;
+  tmp.seq = in->seq;
   *out = tmp;
 }
 
