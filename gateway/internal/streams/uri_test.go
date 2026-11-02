@@ -28,10 +28,11 @@ func TestURIValidation(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "a.mp4"), filepath.Join(root, "inside.mp4")); err != nil {
 		t.Fatal(err)
 	}
-	p := URIPolicy{MediaRoot: root, AllowedSchemes: []string{"file", "device", "rtsp", "http"}, AllowedHosts: []string{"cam.local", "Other.Example"}}
+	p := URIPolicy{MediaRoot: root, AllowedSchemes: []string{"file", "device", "rtsp", "http", "rtmp", "srt"}, AllowedHosts: []string{"cam.local", "Other.Example"}}
 
 	ok := []string{"a.mp4", "sub/b.mp4", "file:a.mp4", "file://sub/b.mp4", "inside.mp4", filepath.Join(root, "a.mp4"), "device:0", "device:12",
-		"rtsp://cam.local:554/stream", "http://other.example/mjpeg"}
+		"rtsp://cam.local:554/stream", "http://other.example/mjpeg",
+		"rtmp://cam.local/live/main", "srt://cam.local:9000?streamid=a"}
 	for _, u := range ok {
 		if _, err := p.Validate(u); err != nil {
 			t.Errorf("%q should be valid: %v", u, err)
@@ -42,7 +43,9 @@ func TestURIValidation(t *testing.T) {
 		"device:abc", "device:1234", "device:-1",
 		"https://cam.local/x", // https scheme not allowed
 		"rtsp://evil.example/x", "rtsp://user:pw@cam.local/x", "ftp://cam.local/x", "javascript:alert(1)", "a.mp4\x00.png",
-		"rtsp://cam.local@evil.example/x"}
+		"rtsp://cam.local@evil.example/x",
+		"rtmp://evil.example/live", "rtmp://user:pw@cam.local/live", "rtmps://cam.local/live", // rtmps not enabled
+		"srt://evil.example/x?streamid=a"}
 	for _, u := range bad {
 		if _, err := p.Validate(u); err == nil {
 			t.Errorf("%q should be rejected", u)

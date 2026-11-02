@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -75,7 +76,7 @@ func run() error {
 	reg := streams.NewRegistry(m, streams.URIPolicy{MediaRoot: cfg.MediaRoot, AllowedSchemes: cfg.AllowedSchemes, AllowedHosts: cfg.AllowedHosts}, log)
 	sessions := session.NewManager()
 	srv := api.New(api.Deps{Auth: a, Streams: reg, Sessions: sessions, AgentURL: cfg.AgentURL, InternalToken: cfg.InternalToken,
-		OriginPatterns: cfg.AllowedOrigins, Log: log})
+		ExportRoot: filepath.Join(cfg.MediaRoot, "exports"), OriginPatterns: cfg.AllowedOrigins, Log: log})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
