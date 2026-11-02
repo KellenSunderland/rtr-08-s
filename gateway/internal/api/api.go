@@ -3,6 +3,7 @@ package api
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +12,10 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/argus-video/argus/gateway/internal/auth"
@@ -41,6 +45,7 @@ type Deps struct {
 	Streams        *streams.Registry
 	Sessions       *session.Manager
 	AgentURL       string
+	ExportRoot     string // clip exports are written under this directory ("" disables export)
 	InternalToken  string
 	OriginPatterns []string
 	Log            *slog.Logger
@@ -80,6 +85,7 @@ func New(d Deps) *Server {
 	v1.HandleFunc("DELETE /v1/streams/{id}", s.deleteStream)
 	v1.HandleFunc("GET /v1/streams/{id}/frame", s.getFrame)
 	v1.HandleFunc("GET /v1/streams/{id}/clip", s.getClip)
+	v1.HandleFunc("POST /v1/streams/{id}/clip/export", s.exportClip)
 	v1.HandleFunc("POST /v1/sessions", s.createSession)
 	v1.HandleFunc("GET /v1/sessions", s.listSessions)
 	v1.HandleFunc("GET /v1/sessions/{id}", s.getSession)
@@ -336,11 +342,17 @@ type clipEntry struct {
 	WallMs int64  `json:"wall_ms"`
 }
 
-func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
-	st, ok := s.ownedStream(w, r)
-	if !ok {
-		return
-	}
+// clipReq is a validated clip window shared by the download and export endpoints.
+type clipReq struct {
+	from, to int64
+	fps      float64
+	maxW     int
+	origin   int64
+}
+
+// clipRequest parses and validates the clip query for st; on failure it has
+// already written the error response.
+func (s *Server) clipRequest(w http.ResponseWriter, r *http.Request, st *streams.Stream) (clipReq, bool) {
 	from, hf, ok1 := intParam(r, "from_ms")
 	to, ht, ok2 := intParam(r, "to_ms")
 	maxW, ok3 := maxWParam(r)
@@ -355,31 +367,36 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case !hf || !ht || !ok1 || !ok2 || !ok3:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "from_ms and to_ms are required integers; fps and max_w must be valid")
-		return
+		return clipReq{}, false
 	case from < 0 || to <= from:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "require 0 <= from_ms < to_ms")
-		return
+		return clipReq{}, false
 	case to-from > maxClipSpanMs:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "clip longer than 10 minutes")
-		return
+		return clipReq{}, false
 	case fps <= 0 || fps > maxClipFPS:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "fps must be in (0, 10]")
-		return
+		return clipReq{}, false
 	}
 	origin, ok := s.clockOrigin(w, r)
 	if !ok {
-		return
+		return clipReq{}, false
 	}
-	m := s.Streams.Media()
 	fromNs, toNs := origin+from*1e6, origin+to*1e6
-	if first, _, err := m.Range(st.Idx, fromNs, toNs, 1); err != nil || len(first) == 0 {
+	if first, _, err := s.Streams.Media().Range(st.Idx, fromNs, toNs, 1); err != nil || len(first) == 0 {
 		auth.WriteError(w, 404, protocol.CodeNotFound, "no frames in range")
-		return
+		return clipReq{}, false
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.zip"`, st.ID, from, to))
+	return clipReq{from, to, fps, maxW, origin}, true
+}
+
+// writeClip streams the clip as a ZIP of JPEG frames plus index.json and
+// returns the number of frames written.
+func (s *Server) writeClip(ctx context.Context, w io.Writer, st *streams.Stream, c clipReq) (int, error) {
+	m := s.Streams.Media()
+	fromNs, toNs := c.origin+c.from*1e6, c.origin+c.to*1e6
 	zw := zip.NewWriter(w)
-	stepNs := int64(1e9 / fps)
+	stepNs := int64(1e9 / c.fps)
 	half := stepNs / 2
 	if half < 1 {
 		half = 1
@@ -392,7 +409,7 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		lastTs = f.TsNs
-		sf, err := scaled(m, f, maxW)
+		sf, err := scaled(m, f, c.maxW)
 		if err != nil {
 			continue
 		}
@@ -403,20 +420,90 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 		name := fmt.Sprintf("frames/%06d.jpg", len(entries)+1)
 		fw, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
 		if err != nil {
-			return
+			return len(entries), err
 		}
 		if _, err := fw.Write(jpg); err != nil {
-			return
+			return len(entries), err
 		}
-		entries = append(entries, clipEntry{name, (f.TsNs - origin) / 1e6, f.WallNs / 1e6})
-		if r.Context().Err() != nil {
-			return
+		entries = append(entries, clipEntry{name, (f.TsNs - c.origin) / 1e6, f.WallNs / 1e6})
+		if ctx.Err() != nil {
+			return len(entries), ctx.Err()
 		}
 	}
 	if fw, err := zw.Create("index.json"); err == nil {
-		_ = json.NewEncoder(fw).Encode(map[string]any{"stream_id": st.ID, "from_ms": from, "to_ms": to, "fps": fps, "frames": entries})
+		_ = json.NewEncoder(fw).Encode(map[string]any{"stream_id": st.ID, "from_ms": c.from, "to_ms": c.to, "fps": c.fps, "frames": entries})
 	}
-	_ = zw.Close()
+	return len(entries), zw.Close()
+}
+
+func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.ownedStream(w, r)
+	if !ok {
+		return
+	}
+	c, ok := s.clipRequest(w, r, st)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.zip"`, st.ID, c.from, c.to))
+	_, _ = s.writeClip(r.Context(), w, st, c)
+}
+
+// confine joins rel under root and rejects anything that would land outside it.
+func confine(root, rel string) (string, error) {
+	if filepath.IsAbs(rel) || strings.ContainsAny(rel, "\\\x00") {
+		return "", errors.New("export name must be a relative path")
+	}
+	full := filepath.Join(root, rel)
+	r, err := filepath.Rel(root, full)
+	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", errors.New("export name escapes the export root")
+	}
+	return full, nil
+}
+
+// exportClip writes the clip to <ExportRoot>/<name>/<stream>-<from>-<to>.zip
+// instead of streaming it back; the response carries the relative path.
+func (s *Server) exportClip(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.ownedStream(w, r)
+	if !ok {
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if s.ExportRoot == "" || name == "" || len(name) > 64 {
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "export is disabled or name is missing/too long")
+		return
+	}
+	c, ok := s.clipRequest(w, r, st)
+	if !ok {
+		return
+	}
+	dir, err := confine(s.ExportRoot, name)
+	if err != nil {
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "invalid export name")
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		auth.WriteError(w, 500, protocol.CodeInternal, "cannot create export directory")
+		return
+	}
+	file := fmt.Sprintf("%s-%d-%d.zip", st.ID, c.from, c.to)
+	out, err := os.Create(filepath.Join(dir, file))
+	if err != nil {
+		auth.WriteError(w, 500, protocol.CodeInternal, "cannot create export file")
+		return
+	}
+	n, err := s.writeClip(r.Context(), out, st, c)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		s.Log.Warn("clip export failed", "stream", st.ID, "err", err)
+		auth.WriteError(w, 500, protocol.CodeInternal, "export failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"path": filepath.Join(name, file), "frames": n})
 }
 
 // ---- sessions
