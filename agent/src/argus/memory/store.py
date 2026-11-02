@@ -26,6 +26,7 @@ SCHEMA_VERSION = "1"
 MINUTE_MS = 60_000
 W_COS, W_RECENCY = 0.7, 0.3
 _MAX_CANDIDATES = 5000
+_ORDER_COLUMNS = frozenset({"wall_ms", "ts_ms", "confidence"})
 
 
 class MemoryDimMismatch(RuntimeError):
@@ -220,10 +221,18 @@ class MemoryStore:
             ).fetchall()
         return [self._row_event(r) for r in reversed(rows)]
 
-    def events_in(self, stream_id: str | None, since_ms: int, until_ms: int) -> list[SceneEvent]:
-        """Events with ``since_ms <= wall_ms < until_ms``."""
+    def events_in(
+        self,
+        stream_id: str | None,
+        since_ms: int,
+        until_ms: int,
+        *,
+        contains: str | None = None,
+        order_by: str = "wall_ms",
+    ) -> list[SceneEvent]:
+        """Events with ``since_ms <= wall_ms < until_ms``, optionally whose summary contains ``contains``."""
         with self._lock:
-            rows = self._events_rows(stream_id, since_ms, until_ms)
+            rows = self._events_rows(stream_id, since_ms, until_ms, contains, order_by)
         return [self._row_event(r) for r in rows]
 
     def events_by_ts(self, stream_id: str, since_ts_ms: int, until_ts_ms: int) -> list[SceneEvent]:
@@ -235,13 +244,23 @@ class MemoryStore:
             ).fetchall()
         return [self._row_event(r) for r in rows]
 
-    def _events_rows(self, stream_id: str | None, since_ms: int, until_ms: int) -> list[sqlite3.Row]:
+    def _events_rows(
+        self,
+        stream_id: str | None,
+        since_ms: int,
+        until_ms: int,
+        contains: str | None = None,
+        order_by: str = "wall_ms",
+    ) -> list[sqlite3.Row]:
         sql = "SELECT * FROM events WHERE wall_ms>=? AND wall_ms<?"
         args: list[Any] = [since_ms, until_ms]
         if stream_id is not None:
             sql += " AND stream_id=?"
             args.append(stream_id)
-        return self.db.execute(sql + " ORDER BY wall_ms, ts_ms, rowid", args).fetchall()
+        if contains:
+            sql += f" AND summary LIKE '%{contains}%'"  # noqa: S608
+        col = order_by if order_by in _ORDER_COLUMNS else "wall_ms"
+        return self.db.execute(sql + f" ORDER BY {col}, ts_ms, rowid", args).fetchall()  # noqa: S608
 
     def _summary_rows(self, stream_id: str | None, since_ms: int, until_ms: int) -> list[sqlite3.Row]:
         sql = "SELECT rowid AS rid, * FROM minute_summaries WHERE wall_ms>=? AND wall_ms<?"
@@ -277,11 +296,13 @@ class MemoryStore:
         until_ms: int,
         text: str | None = None,
         limit: int = 50,
+        contains: str | None = None,
     ) -> SearchResult:
         """Time-window filter, then (if ``text``) vector top-k re-ranked by ``0.7*cos + 0.3*recency``.
 
         ``recency`` is the position of ``wall_ms`` inside the window (1 = newest). Without ``text`` the
-        newest ``limit`` events are returned in chronological order.
+        newest ``limit`` events are returned in chronological order. ``contains`` narrows the candidate
+        events to those whose summary contains the substring before any vector work happens.
         """
         if until_ms <= since_ms:
             return SearchResult()
@@ -292,7 +313,7 @@ class MemoryStore:
 
         if text is None or not text.strip():
             with self._lock:
-                rows = self._events_rows(stream_id, since_ms, until_ms)
+                rows = self._events_rows(stream_id, since_ms, until_ms, contains)
                 srows = self._summary_rows(stream_id, since_ms, until_ms)
             truncated = len(rows) > limit
             rows = rows[-limit:] if truncated else rows
@@ -303,7 +324,7 @@ class MemoryStore:
         await self.embed_pending()
         q = (await self.embedder.embed([text]))[0]
         with self._lock:
-            rows = self._events_rows(stream_id, since_ms, until_ms)
+            rows = self._events_rows(stream_id, since_ms, until_ms, contains)
             srows = self._summary_rows(stream_id, since_ms, until_ms)
             cos = self._knn("events_vec", [int(r["rowid"]) for r in rows[-_MAX_CANDIDATES:]], q)
             scos = self._knn("summaries_vec", [int(r["rid"]) for r in srows[-_MAX_CANDIDATES:]], q)
