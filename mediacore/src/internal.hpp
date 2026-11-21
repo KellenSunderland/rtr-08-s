@@ -83,6 +83,7 @@ class FrameStore {
   void prune(int64_t now_ns);
   void remove_stream(uint32_t stream_id);
   mc_frame_store_stats stats() const;
+  mc_stream_health stream_health(uint32_t stream_id) const;
 
  private:
   struct Stream {

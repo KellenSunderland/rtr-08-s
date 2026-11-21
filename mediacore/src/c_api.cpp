@@ -203,6 +203,10 @@ mc_status mc_frame_store_remove_stream(mc_frame_store* store, uint32_t stream_id
 mc_status mc_frame_store_stats_get(mc_frame_store* store, mc_frame_store_stats* out) {
   return guard([&] { *need(out, "out") = need(store, "store")->impl.stats(); });
 }
+mc_status mc_frame_store_stream_health(mc_frame_store* store, uint32_t stream_id,
+                                       mc_stream_health* out) {
+  return guard([&] { *need(out, "out") = need(store, "store")->impl.stream_health(stream_id); });
+}
 
 mc_status mc_capture_open(const char* uri, mc_capture** out) {
   return guard([&] {
