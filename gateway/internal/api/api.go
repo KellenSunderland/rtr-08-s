@@ -84,6 +84,7 @@ func New(d Deps) *Server {
 	v1.HandleFunc("GET /v1/sessions", s.listSessions)
 	v1.HandleFunc("GET /v1/sessions/{id}", s.getSession)
 	v1.HandleFunc("DELETE /v1/sessions/{id}", s.deleteSession)
+	v1.HandleFunc("GET /v1/sessions/{id}/snapshot", s.getSessionSnapshot)
 	v1.Handle("GET /v1/sessions/{id}/ws", http.HandlerFunc(s.sessWS.ServeWS))
 	v1.HandleFunc("GET /v1/history", s.proxyHistory)
 	v1.HandleFunc("GET /v1/scenarios", s.proxyScenarios)
@@ -481,6 +482,37 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.Sessions.Close(sess.ID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type snapshotFrame struct {
+	StreamID string `json:"stream_id"`
+	TsMs     int64  `json:"ts_ms"`
+	WallMs   int64  `json:"wall_ms"`
+	W        int    `json:"w"`
+	H        int    `json:"h"`
+}
+
+// getSessionSnapshot lists the newest stored frame of every stream in the session, so a client
+// can pick a ts_ms for GET /v1/streams/{id}/frame without polling each stream.
+func (s *Server) getSessionSnapshot(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.ownedSession(w, r)
+	if !ok {
+		return
+	}
+	m := s.Streams.Media()
+	frames := []snapshotFrame{}
+	for _, id := range sess.StreamIDs {
+		st, ok := s.Streams.Get(id)
+		if !ok {
+			continue
+		}
+		f, err := m.Latest(st.Idx)
+		if err != nil {
+			continue
+		}
+		frames = append(frames, snapshotFrame{StreamID: id, TsMs: (f.TsNs - s.Streams.OriginNs()) / 1e6, WallMs: f.WallNs / 1e6, W: f.W, H: f.H})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": sess.ID, "frames": frames})
 }
 
 // ---- proxies to the agent

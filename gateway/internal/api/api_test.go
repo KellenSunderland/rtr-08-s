@@ -273,6 +273,41 @@ func TestSessionCRUDAndQuota(t *testing.T) {
 	e.mustStatus(e.do("POST", "/v1/sessions", tokA, protocol.CreateSessionRequest{Scenario: "pets", StreamIDs: []string{"cam1"}}), 201)
 }
 
+func TestSessionSnapshot(t *testing.T) {
+	e := newEnv(t)
+	e.addStream("cam1", "fake://32x24@20", tokA)
+	e.addStream("cam2", "fake://16x16@20", tokA)
+	e.waitFrames("cam1", 5)
+	e.waitFrames("cam2", 5)
+	var si protocol.SessionInfo
+	_ = json.Unmarshal(e.mustStatus(e.do("POST", "/v1/sessions", tokA, protocol.CreateSessionRequest{Scenario: "pets", StreamIDs: []string{"cam1", "cam2"}}), 201), &si)
+
+	var snap struct {
+		SessionID string `json:"session_id"`
+		Frames    []struct {
+			StreamID string `json:"stream_id"`
+			TsMs     int64  `json:"ts_ms"`
+			WallMs   int64  `json:"wall_ms"`
+			W        int    `json:"w"`
+			H        int    `json:"h"`
+		} `json:"frames"`
+	}
+	_ = json.Unmarshal(e.mustStatus(e.do("GET", "/v1/sessions/"+si.ID+"/snapshot", tokA, nil), 200), &snap)
+	if snap.SessionID != si.ID || len(snap.Frames) != 2 {
+		t.Fatalf("snapshot %+v", snap)
+	}
+	for _, f := range snap.Frames {
+		if f.WallMs <= 0 || f.TsMs < 0 || f.W == 0 || f.H == 0 {
+			t.Fatalf("bad frame entry %+v", f)
+		}
+	}
+	if snap.Frames[0].StreamID != "cam1" || snap.Frames[0].W != 32 {
+		t.Fatalf("order/geometry %+v", snap.Frames[0])
+	}
+	e.mustStatus(e.do("GET", "/v1/sessions/"+si.ID+"/snapshot", tokB, nil), 404)
+	e.mustStatus(e.do("GET", "/v1/sessions/not-a-uuid/snapshot", tokA, nil), 404)
+}
+
 func TestProxyHistoryAndScenarios(t *testing.T) {
 	e := newEnv(t)
 	b := e.mustStatus(e.do("GET", "/v1/scenarios", tokA, nil), 200)
