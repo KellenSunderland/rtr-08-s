@@ -33,6 +33,7 @@ def test_builtin_packs_load(packs):
         "state.snapshot",
     } <= set(pb.event_types)
     assert pb.tool_names() == ["current_score", "last_point"]
+    assert packs.get("home_monitor").tool_names() == ["last_seen", "activity"]
     assert pb.new_state().snapshot()["score"] == {"A": 0, "B": 0}
 
 
