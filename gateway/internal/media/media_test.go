@@ -34,6 +34,37 @@ func TestStoreNearestRangeOrder(t *testing.T) {
 	}
 }
 
+func TestRangeMetaMatchesRange(t *testing.T) {
+	m := NewFake(StoreConfig{})
+	for i, ts := range []int64{100, 200, 300, 400, 500} {
+		f := mk(1, ts)
+		f.WallNs, f.Seq = 1_700_000_000_000_000_000+ts, uint64(i+1)
+		if err := m.Push(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs, total, _ := m.Range(1, 150, 450, 10)
+	ms, mtotal, err := m.RangeMeta(1, 150, 450, 10)
+	if err != nil || len(ms) != len(fs) || mtotal != total {
+		t.Fatalf("meta %d/%d vs range %d/%d (%v)", len(ms), mtotal, len(fs), total, err)
+	}
+	for i := range ms {
+		if ms[i].TsNs != fs[i].TsNs || ms[i].WallNs != fs[i].WallNs || ms[i].Seq != fs[i].Seq || ms[i].W != 4 || ms[i].H != 4 {
+			t.Fatalf("meta %+v vs frame ts %d", ms[i], fs[i].TsNs)
+		}
+	}
+	ms, mtotal, _ = m.RangeMeta(1, 0, 1000, 2)
+	if len(ms) != 2 || mtotal != 5 || ms[0].TsNs != 100 {
+		t.Fatalf("capped: %+v total %d", ms, mtotal)
+	}
+	if _, _, err := m.RangeMeta(1, 0, 1000, 0); err != ErrInvalid {
+		t.Fatal("cap 0 must be invalid")
+	}
+	if ms, _, _ := m.RangeMeta(9, 0, 1000, 5); len(ms) != 0 {
+		t.Fatal("unknown stream must be empty")
+	}
+}
+
 func TestPruneThinning(t *testing.T) {
 	m := NewFake(StoreConfig{RetentionNs: 100e9, ThinAfterNs: 10e9, ThinnedIntervalNs: 1e9})
 	for i := int64(0); i < 40; i++ { // 10 fps over 4s

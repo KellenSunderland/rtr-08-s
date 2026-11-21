@@ -215,6 +215,25 @@ func (m *Fake) Stats() (Stats, error) {
 	return s, nil
 }
 
+// RangeMeta walks the stream's frames without copying pixel data.
+func (m *Fake) RangeMeta(id uint32, from, to int64, cap int) ([]FrameMeta, int, error) {
+	if cap <= 0 {
+		return nil, 0, ErrInvalid
+	}
+	fs := m.streams[id]
+	i := sort.Search(len(fs), func(i int) bool { return fs[i].TsNs >= from })
+	var out []FrameMeta
+	total := 0
+	for ; i < len(fs) && fs[i].TsNs <= to; i++ {
+		total++
+		if len(out) < cap {
+			f := &fs[i]
+			out = append(out, FrameMeta{TsNs: f.TsNs, WallNs: f.WallNs, W: f.W, H: f.H, Seq: f.Seq})
+		}
+	}
+	return out, total, nil
+}
+
 // gray returns the luma at pixel (x,y).
 func gray(f Frame, x, y int) int {
 	o := y*f.Stride + x*f.Fmt.BPP()

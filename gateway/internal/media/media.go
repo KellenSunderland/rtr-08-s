@@ -73,6 +73,14 @@ type Stats struct {
 	ThinnedTotal uint64
 }
 
+// FrameMeta is a stored frame's metadata, without pixel data.
+type FrameMeta struct {
+	TsNs   int64 // monotonic
+	WallNs int64 // unix epoch
+	W, H   int
+	Seq    uint64
+}
+
 // Capture is a single-threaded frame source. Read blocks until the next frame
 // and returns io.EOF at end of stream. Close may be called concurrently with
 // Read to unblock it.
@@ -94,6 +102,8 @@ type Media interface {
 	Prune(nowNs int64) error
 	RemoveStream(streamID uint32) error
 	Stats() (Stats, error)
+	// RangeMeta is Range without the pixel copies: metadata only, for indexing.
+	RangeMeta(streamID uint32, fromNs, toNs int64, cap int) ([]FrameMeta, int, error)
 
 	// Image ops.
 	MotionScore(a, b Frame) float64 // negative on error
