@@ -5,11 +5,13 @@ export interface Scoreboard {
   scores: Record<string, number>;
   rallies: number;
   rallyActive: boolean;
+  /** Faults called against each team (keyed like `scores`). */
+  faults: Record<string, number>;
   lastPointTs?: number;
   lastWinner?: string;
 }
 
-export const emptyScoreboard: Scoreboard = { scores: {}, rallies: 0, rallyActive: false };
+export const emptyScoreboard: Scoreboard = { scores: {}, rallies: 0, rallyActive: false, faults: {} };
 
 export function winnerOf(e: Pick<SceneEvent, "attrs">): string {
   const a = e.attrs;
@@ -32,6 +34,18 @@ export function applyScoreEvent(s: Scoreboard, e: SceneEvent): Scoreboard {
       rallyActive: false,
       lastPointTs: e.ts_ms,
       lastWinner: w,
+    };
+  }
+  if (e.type.startsWith("fault.")) {
+    const t = winnerOf(e);
+    const opp = t === "A" ? "B" : t === "B" ? "A" : null;
+    return {
+      ...s,
+      scores: opp ? { ...s.scores, [opp]: (s.scores[opp] ?? 0) + 1 } : s.scores,
+      faults: { ...s.faults, [t]: (s.faults[t] ?? 0) + 1 },
+      rallyActive: false,
+      lastPointTs: opp ? e.ts_ms : s.lastPointTs,
+      lastWinner: opp ?? s.lastWinner,
     };
   }
   return s;
