@@ -20,6 +20,18 @@ struct Store {
     f.f.seq = static_cast<uint64_t>(ts);
     return mc_frame_store_push(s, f.get());
   }
+  mc_status push_seq(uint32_t stream, int64_t ts, uint64_t seq) {
+    Frame f(4, 4, MC_PIXFMT_GRAY8);
+    f.f.ts_ns = ts;
+    f.f.stream_id = stream;
+    f.f.seq = seq;
+    return mc_frame_store_push(s, f.get());
+  }
+  mc_stream_health health(uint32_t stream) {
+    mc_stream_health h{};
+    EXPECT_EQ(mc_frame_store_stream_health(s, stream, &h), MC_OK);
+    return h;
+  }
   mc_frame_store_stats stats() {
     mc_frame_store_stats st{};
     EXPECT_EQ(mc_frame_store_stats_get(s, &st), MC_OK);
@@ -247,4 +259,38 @@ TEST(FrameStore, ConcurrentPushAndRead) {
   for (auto& t : th) t.join();
   EXPECT_EQ(st.stats().frames, 1200u);
   EXPECT_EQ(st.stats().streams, 4u);
+}
+
+TEST(FrameStore, StreamHealthEmptyStream) {
+  Store st;
+  mc_stream_health h = st.health(7);
+  EXPECT_EQ(h.frames, 0u);
+  EXPECT_EQ(h.dropped, 0u);
+  EXPECT_EQ(h.avg_fps, 0.0);
+  EXPECT_EQ(mc_frame_store_stream_health(st.s, 7, nullptr), MC_ERR_INVALID_ARG);
+}
+
+TEST(FrameStore, StreamHealthCountsSequenceGaps) {
+  Store st;
+  const int64_t step = 100000000;  // 10 fps
+  for (uint64_t seq : {1, 2, 3, 6, 7, 10}) ASSERT_EQ(st.push_seq(1, static_cast<int64_t>(seq) * step, seq), MC_OK);
+  ASSERT_EQ(st.push_seq(2, step, 1), MC_OK);
+  mc_stream_health h = st.health(1);
+  EXPECT_EQ(h.frames, 6u);
+  EXPECT_EQ(h.first_seq, 1u);
+  EXPECT_EQ(h.last_seq, 10u);
+  EXPECT_EQ(h.dropped, 4u);
+  EXPECT_EQ(h.oldest_ts_ns, step);
+  EXPECT_EQ(h.newest_ts_ns, 10 * step);
+  EXPECT_NEAR(h.avg_fps, 5.0 / 0.9, 1e-9);
+  EXPECT_EQ(st.health(2).dropped, 0u);
+}
+
+TEST(FrameStore, StreamHealthContiguousStream) {
+  Store st;
+  for (uint64_t seq = 1; seq <= 31; ++seq)
+    ASSERT_EQ(st.push_seq(3, static_cast<int64_t>(seq) * 33333333, seq), MC_OK);
+  mc_stream_health h = st.health(3);
+  EXPECT_EQ(h.dropped, 0u);
+  EXPECT_NEAR(h.avg_fps, 30.0, 0.01);
 }

@@ -224,4 +224,22 @@ mc_frame_store_stats FrameStore::stats() const {
   return st;
 }
 
+mc_stream_health FrameStore::stream_health(uint32_t id) const {
+  mc_stream_health h{};
+  std::lock_guard<std::mutex> lk(mu_);
+  auto it = streams_.find(id);
+  if (it == streams_.end() || it->second.frames.empty()) return h;
+  const auto& fr = it->second.frames;
+  h.frames = fr.size();
+  h.oldest_ts_ns = fr.front()->frame.ts_ns;
+  h.newest_ts_ns = fr.back()->frame.ts_ns;
+  h.first_seq = fr.front()->frame.seq;
+  h.last_seq = fr.back()->frame.seq;
+  h.dropped = (h.last_seq - h.first_seq + 1) - h.frames;
+  const int64_t span = h.newest_ts_ns - h.oldest_ts_ns;
+  if (h.frames > 1 && span > 0)
+    h.avg_fps = static_cast<double>(h.frames - 1) * 1e9 / static_cast<double>(span);
+  return h;
+}
+
 }  // namespace mediacore

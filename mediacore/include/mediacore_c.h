@@ -170,6 +170,23 @@ typedef struct mc_frame_store_stats {
 
 MC_API mc_status mc_frame_store_stats_get(mc_frame_store* store, mc_frame_store_stats* out);
 
+/* Capture health for one stream, derived from the frames currently held. All fields are zero
+ * for a stream with no frames. `dropped` is the number of sequence numbers between the oldest
+ * and newest stored frame that have no stored frame; `avg_fps` is the mean frame rate over the
+ * stored span. */
+typedef struct mc_stream_health {
+    size_t frames;
+    int64_t oldest_ts_ns;
+    int64_t newest_ts_ns;
+    uint64_t first_seq;
+    uint64_t last_seq;
+    uint64_t dropped;
+    double avg_fps;
+} mc_stream_health;
+
+MC_API mc_status mc_frame_store_stream_health(mc_frame_store* store, uint32_t stream_id,
+                                              mc_stream_health* out);
+
 /* --------------------------------------------------------- capture */
 
 typedef struct mc_capture mc_capture;
