@@ -37,6 +37,56 @@ async def test_text_turn_text_then_audio(providers, store, packs):
     assert [t["role"] for t in store.transcripts(SID)] == ["user", "assistant"]
 
 
+async def test_long_history_is_condensed(providers, store, packs):
+    from argus.conversation.session import CONDENSE_AT, CONTEXT_PREFIX, KEEP_MESSAGES
+
+    s = make_session(providers, store, packs)
+    await s.handle(START)
+    turns = 0
+    while s.deps.metrics.total("argus_history_condensed_total") == 0:
+        turns += 1
+        await s.handle({"type": "text.message", "text": f"remember item number {turns}"})
+        await s.wait_quiescent()
+        assert turns < 40
+    h = s._history
+    assert h[0].role == "user" and h[0].content.startswith(CONTEXT_PREFIX + "Summary of")
+    assert "remember item number 1" in h[0].content
+    assert len(h) == KEEP_MESSAGES + 1 and len(h) <= CONDENSE_AT
+    assert h[-1].role == "assistant" and h[-1].content == f"You said: remember item number {turns}"
+    await s.close()
+
+
+async def test_condensation_failure_keeps_history(providers, store, packs):
+    from argus.conversation.session import ChatMessage
+    from argus.providers.base import ProviderError
+
+    s = make_session(providers, store, packs)
+    await s.handle(START)
+    s._history = [ChatMessage(role="user" if i % 2 == 0 else "assistant", content=f"m{i}") for i in range(30)]
+    before = list(s._history)
+
+    async def failing(*_a, **_k):
+        raise ProviderError("down")
+        yield  # pragma: no cover
+
+    providers.chat.complete = failing
+    await s._condense_history()
+    assert s._history == before
+    assert s.deps.metrics.total("argus_history_condensed_total") == 0
+    await s.close()
+
+
+async def test_short_history_not_condensed(providers, store, packs):
+    s = make_session(providers, store, packs)
+    await s.handle(START)
+    for i in range(3):
+        await s.handle({"type": "text.message", "text": f"hello {i}"})
+        await s.wait_quiescent()
+    await s.close()
+    assert s.deps.metrics.total("argus_history_condensed_total") == 0
+    assert not any(m.content.startswith("(Summary") for m in s._history)
+
+
 async def test_barge_in_cancelled_is_last_in_flight(providers, store, packs):
     providers.chat.responses = None
     providers.chat._responses = ["one two three four five six seven eight nine ten " * 3]
