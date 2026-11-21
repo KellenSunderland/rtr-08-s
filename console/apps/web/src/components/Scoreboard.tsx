@@ -29,6 +29,15 @@ export function Scoreboard({ events }: { events: readonly SceneEvent[] }) {
           {snap.side_switched ? " · sides switched" : ""}
         </div>
       )}
+      {Object.keys(sb.faults).length > 0 && (
+        <div className="muted small">
+          faults:{" "}
+          {Object.entries(sb.faults)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([side, n]) => `${side} ${n}`)
+            .join(" · ")}
+        </div>
+      )}
       <div className="muted small">
         rallies: {sb.rallies}
         {sb.rallyActive ? " (in play)" : ""}

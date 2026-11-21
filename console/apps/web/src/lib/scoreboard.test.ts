@@ -66,4 +66,25 @@ describe("scoreboard", () => {
     ).toMatchObject({ score: { A: 3, B: 1 }, serving_team: "A", server_number: 2 });
     expect(parseSnapshotScore({ x: 1 })).toBeNull();
   });
+
+  it("tallies faults per team and credits the opposing team", () => {
+    const sb = reduceScoreboard([
+      ev("rally.start", 1),
+      ev("fault.kitchen", 4, { team: "A" }),
+      ev("rally.start", 6),
+      ev("fault.serve", 9, { team: "b" }),
+      ev("fault.serve", 12, { team: "B" }),
+    ]);
+    expect(sb.faults).toEqual({ A: 1, B: 2 });
+    expect(sb.scores).toEqual({ B: 1, A: 2 });
+    expect(sb.lastWinner).toBe("A");
+    expect(sb.rallyActive).toBe(false);
+  });
+
+  it("records a fault with no team without awarding a point", () => {
+    const sb = reduceScoreboard([ev("fault.kitchen", 3)]);
+    expect(sb.faults).toEqual({ unknown: 1 });
+    expect(sb.scores).toEqual({});
+    expect(sb.lastWinner).toBeUndefined();
+  });
 });
