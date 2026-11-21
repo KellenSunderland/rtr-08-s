@@ -131,6 +131,8 @@ void mc_frame_store_config_default(mc_frame_store_config* cfg) {
   cfg->thin_after_ns = 300LL * 1000000000LL;
   cfg->thinned_interval_ns = 1000000000LL;
   cfg->max_bytes = static_cast<size_t>(2) << 30;
+  cfg->scene_cut_threshold = 24.0;
+  cfg->max_cuts_per_stream = 64;
 }
 mc_status mc_frame_store_create(const mc_frame_store_config* cfg, mc_frame_store** out) {
   return guard([&] {
@@ -184,6 +186,23 @@ mc_status mc_frame_store_range(mc_frame_store* store, uint32_t stream_id, int64_
     if (total != nullptr) *total = 0;
     if (cap > 0) need(out, "out");
     auto v = need(store, "store")->impl.range(stream_id, from_ns, to_ns, cap, total);
+    size_t made = 0;
+    try {
+      for (; made < v.size(); ++made) make_view(v[made], &out[made]);
+    } catch (...) {
+      for (size_t i = 0; i < made; ++i) mc_frame_view_release(&out[i]);
+      throw;
+    }
+    *n = made;
+  });
+}
+mc_status mc_frame_store_cuts(mc_frame_store* store, uint32_t stream_id, int64_t from_ns,
+                              int64_t to_ns, mc_frame_view* out, size_t cap, size_t* n) {
+  return guard([&] {
+    need(n, "n");
+    *n = 0;
+    if (cap > 0) need(out, "out");
+    auto v = need(store, "store")->impl.cuts(stream_id, from_ns, to_ns, cap);
     size_t made = 0;
     try {
       for (; made < v.size(); ++made) make_view(v[made], &out[made]);

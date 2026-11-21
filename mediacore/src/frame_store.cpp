@@ -11,11 +11,19 @@ int64_t sat_sub(int64_t a, int64_t b) {
   if (b > 0 && a < std::numeric_limits<int64_t>::min() + b) return std::numeric_limits<int64_t>::min();
   return a - b;
 }
+
+bool scene_cut(const mc_frame_store_config& cfg, const StoredFrame* prev, const StoredFrame& f) {
+  if (cfg.scene_cut_threshold <= 0.0 || cfg.max_cuts_per_stream == 0 || prev == nullptr)
+    return false;
+  // A geometry change (e.g. the source renegotiated its resolution) is always a cut.
+  if (prev->frame.width != f.frame.width || prev->frame.height != f.frame.height) return true;
+  return motion_score(&prev->frame, &f.frame) >= cfg.scene_cut_threshold;
+}
 }  // namespace
 
 FrameStore::FrameStore(const mc_frame_store_config& cfg) : cfg_(cfg) {
   if (cfg.retention_ns <= 0 || cfg.thin_after_ns < 0 || cfg.thinned_interval_ns <= 0 ||
-      cfg.max_bytes == 0)
+      cfg.max_bytes == 0 || !(cfg.scene_cut_threshold >= 0.0))
     fail(MC_ERR_INVALID_ARG, "invalid frame store config");
 }
 
@@ -42,6 +50,10 @@ void FrameStore::push(const mc_frame& f) {
   }
   s.last_ts = f.ts_ns;
   s.has_last = true;
+  if (scene_cut(cfg_, s.frames.empty() ? nullptr : s.frames.back().get(), *sf)) {
+    if (s.cuts.size() >= cfg_.max_cuts_per_stream) s.cuts.pop_front();
+    s.cuts.push_back(sf);
+  }
   s.frames.push_back(std::move(sf));
   bytes_ += bytes;
   evict_to_cap_locked();
@@ -133,6 +145,20 @@ std::vector<FramePtr> FrameStore::range(uint32_t id, int64_t from, int64_t to, s
     }
   }
   if (total != nullptr) *total = matched;
+  return out;
+}
+
+std::vector<FramePtr> FrameStore::cuts(uint32_t id, int64_t from, int64_t to, size_t cap) const {
+  std::vector<FramePtr> out;
+  std::lock_guard<std::mutex> lk(mu_);
+  auto it = streams_.find(id);
+  if (it == streams_.end() || from >= to) return out;
+  const auto& c = it->second.cuts;
+  auto lo = std::lower_bound(c.begin(), c.end(), from,
+                             [](const std::shared_ptr<StoredFrame>& p, int64_t t) {
+                               return p->frame.ts_ns < t;
+                             });
+  for (; lo != c.end() && (*lo)->frame.ts_ns < to && out.size() < cap; ++lo) out.push_back(*lo);
   return out;
 }
 

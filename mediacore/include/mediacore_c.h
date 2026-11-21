@@ -121,6 +121,11 @@ typedef struct mc_frame_store_config {
     int64_t thin_after_ns;       /* default 300e9 (5 min): full-rate before, thinned after */
     int64_t thinned_interval_ns; /* default 1e9 (1 fps) */
     size_t max_bytes;            /* default 2 GiB */
+    /* Scene-cut index: a pushed frame whose mean absolute gray-level difference
+     * (0..255) from the stream's previous frame is >= scene_cut_threshold is
+     * recorded as a cut. Default 24; 0 disables the index. */
+    double scene_cut_threshold;
+    size_t max_cuts_per_stream;  /* default 64; oldest cuts are forgotten first */
 } mc_frame_store_config;
 
 /* Fills `cfg` with defaults. */
@@ -157,6 +162,11 @@ MC_API mc_status mc_frame_store_range(mc_frame_store* store, uint32_t stream_id,
 MC_API mc_status mc_frame_store_prune(mc_frame_store* store, int64_t now_ns);
 /* Drop all frames for a stream. */
 MC_API mc_status mc_frame_store_remove_stream(mc_frame_store* store, uint32_t stream_id);
+/* Scene cuts with from_ns <= ts_ns < to_ns, oldest first, at most `cap` (see
+ * scene_cut_threshold). `*n` receives the count written. Views must each be
+ * released. Used for timeline thumbnails and clip chapter marks. */
+MC_API mc_status mc_frame_store_cuts(mc_frame_store* store, uint32_t stream_id, int64_t from_ns,
+                                     int64_t to_ns, mc_frame_view* out, size_t cap, size_t* n);
 
 typedef struct mc_frame_store_stats {
     size_t frames;

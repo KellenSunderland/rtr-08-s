@@ -56,6 +56,8 @@ TEST(FrameStore, Defaults) {
   EXPECT_EQ(c.thin_after_ns, 300LL * 1000000000LL);
   EXPECT_EQ(c.thinned_interval_ns, 1000000000LL);
   EXPECT_EQ(c.max_bytes, size_t{2} << 30);
+  EXPECT_DOUBLE_EQ(c.scene_cut_threshold, 24.0);
+  EXPECT_EQ(c.max_cuts_per_stream, 64u);
   c.thinned_interval_ns = 0;
   mc_frame_store* s = nullptr;
   EXPECT_EQ(mc_frame_store_create(&c, &s), MC_ERR_INVALID_ARG);
@@ -247,4 +249,61 @@ TEST(FrameStore, ConcurrentPushAndRead) {
   for (auto& t : th) t.join();
   EXPECT_EQ(st.stats().frames, 1200u);
   EXPECT_EQ(st.stats().streams, 4u);
+}
+
+namespace {
+mc_status push_geom(mc_frame_store* s, uint32_t stream, int64_t ts, int32_t w, int32_t h) {
+  Frame f(w, h, MC_PIXFMT_GRAY8);
+  f.fill(static_cast<uint8_t>(ts));
+  f.f.ts_ns = ts;
+  f.f.stream_id = stream;
+  return mc_frame_store_push(s, f.get());
+}
+
+std::vector<int64_t> cuts(mc_frame_store* s, uint32_t stream, int64_t from, int64_t to,
+                          size_t cap = 16) {
+  std::vector<mc_frame_view> v(cap);
+  size_t n = 99;
+  EXPECT_EQ(mc_frame_store_cuts(s, stream, from, to, v.data(), cap, &n), MC_OK);
+  std::vector<int64_t> ts;
+  for (size_t i = 0; i < n; ++i) {
+    ts.push_back(v[i].frame->ts_ns);
+    mc_frame_view_release(&v[i]);
+  }
+  return ts;
+}
+}  // namespace
+
+TEST(FrameStore, SceneCutsOnGeometryChange) {
+  Store st;
+  ASSERT_EQ(push_geom(st.s, 1, 10, 4, 4), MC_OK);  // first frame is not a cut
+  ASSERT_EQ(push_geom(st.s, 1, 20, 4, 4), MC_OK);
+  ASSERT_EQ(push_geom(st.s, 1, 30, 8, 4), MC_OK);
+  ASSERT_EQ(push_geom(st.s, 1, 40, 8, 4), MC_OK);
+  ASSERT_EQ(push_geom(st.s, 1, 50, 4, 4), MC_OK);
+  EXPECT_EQ(cuts(st.s, 1, 0, 100), (std::vector<int64_t>{30, 50}));
+  EXPECT_EQ(cuts(st.s, 1, 30, 50), (std::vector<int64_t>{30}));  // half-open
+  EXPECT_EQ(cuts(st.s, 1, 0, 100, 1), (std::vector<int64_t>{30}));
+  EXPECT_TRUE(cuts(st.s, 2, 0, 100).empty());
+  EXPECT_TRUE(cuts(st.s, 1, 100, 0).empty());
+}
+
+TEST(FrameStore, SceneCutsCappedAndDisabled) {
+  mc_frame_store_config c = cfg(1000000, 1000000, 100, 1 << 20);
+  c.max_cuts_per_stream = 2;
+  Store st(c);
+  for (int64_t t = 1; t <= 5; ++t) ASSERT_EQ(push_geom(st.s, 1, t, 4 + (t % 2) * 4, 4), MC_OK);
+  EXPECT_EQ(cuts(st.s, 1, 0, 100), (std::vector<int64_t>{4, 5}));
+
+  c.scene_cut_threshold = 0.0;
+  Store off(c);
+  for (int64_t t = 1; t <= 5; ++t) ASSERT_EQ(push_geom(off.s, 1, t, 4 + (t % 2) * 4, 4), MC_OK);
+  EXPECT_TRUE(cuts(off.s, 1, 0, 100).empty());
+
+  c.scene_cut_threshold = -1.0;
+  mc_frame_store* bad = nullptr;
+  EXPECT_EQ(mc_frame_store_create(&c, &bad), MC_ERR_INVALID_ARG);
+  size_t n = 0;
+  EXPECT_EQ(mc_frame_store_cuts(st.s, 1, 0, 100, nullptr, 4, &n), MC_ERR_INVALID_ARG);
+  EXPECT_EQ(mc_frame_store_cuts(st.s, 1, 0, 100, nullptr, 0, nullptr), MC_ERR_INVALID_ARG);
 }
