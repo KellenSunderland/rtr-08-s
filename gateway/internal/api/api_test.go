@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image/jpeg"
 	"io"
 	"log/slog"
@@ -284,11 +285,52 @@ func TestProxyHistoryAndScenarios(t *testing.T) {
 		t.Fatalf("query/internal token not forwarded: %s", b)
 	}
 	e.mustStatus(e.do("GET", "/v1/history?since_ms=0", tokA, nil), 400)
+	e.mustStatus(e.do("GET", "/v1/history?since_ms=10&until_ms=5", tokA, nil), 400)
 	e.mustStatus(e.do("GET", "/v1/history?since_ms=0&until_ms=1&limit=999", tokA, nil), 400)
 	e.mustStatus(e.do("GET", "/v1/history?since_ms=0&until_ms=1&stream_id=other", tokA, nil), 404)
+	e.mustStatus(e.do("GET", "/v1/history?session_id=00000000-0000-4000-8000-000000000000", tokA, nil), 404)
 	e.mustStatus(e.do("GET", "/v1/scenarios", "", nil), 401)
 	e.agent.srv.Close()
 	e.mustStatus(e.do("GET", "/v1/scenarios", tokA, nil), 502)
+}
+
+func TestSessionScopedHistory(t *testing.T) {
+	e := newEnv(t)
+	e.addStream("hist1", "fake://16x16@10", tokA)
+	e.addStream("hist2", "fake://16x16@10", tokA)
+	si := e.newSession("hist1", "hist2")
+
+	var page struct {
+		Events    []protocol.SceneEvent    `json:"events"`
+		Summaries []protocol.MinuteSummary `json:"summaries"`
+		Truncated bool                     `json:"truncated"`
+	}
+	b := e.mustStatus(e.do("GET", "/v1/history?session_id="+si.ID+"&limit=3", tokA, nil), 200)
+	if err := json.Unmarshal(b, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 3 || !page.Truncated || len(page.Summaries) != 2 {
+		t.Fatalf("merged page: %s", b)
+	}
+	for i := 1; i < len(page.Events); i++ {
+		if page.Events[i].TsMs > page.Events[i-1].TsMs {
+			t.Fatalf("events not newest-first: %s", b)
+		}
+	}
+	if page.Events[0].StreamID != "hist2" {
+		t.Fatalf("newest event should come from hist2: %s", b)
+	}
+
+	// window defaults are filled in for the single-stream passthrough too
+	e.addStream("cam1", "fake://16x16@10", tokA)
+	b = e.mustStatus(e.do("GET", "/v1/history?session_id="+si.ID+"&stream_id=cam1&limit=7", tokA, nil), 200)
+	if !strings.Contains(string(b), "limit=7") || !strings.Contains(string(b), "until_ms=") || strings.Contains(string(b), "session_id") {
+		t.Fatalf("forwarded query: %s", b)
+	}
+
+	// stream_id narrows a session query to a single proxied request
+	e.mustStatus(e.do("GET", "/v1/history?session_id="+si.ID+"&stream_id=cam9", tokA, nil), 404)
+	e.mustStatus(e.do("GET", "/v1/history?session_id="+si.ID, tokB, nil), 404)
 }
 
 // ---------------------------------------------------------------- session WS
@@ -319,6 +361,18 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			tok = "ok"
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if sid := r.URL.Query().Get("stream_id"); strings.HasPrefix(sid, "hist") {
+			// a real page: two events per stream, offset by the stream's suffix
+			n, _ := strconv.Atoi(strings.TrimPrefix(sid, "hist"))
+			page := protocol.HistoryResult{Truncated: n == 2}
+			for i := range 2 {
+				ts := int64(1000*i + 100*n)
+				page.Events = append(page.Events, protocol.SceneEvent{ID: fmt.Sprintf("e-%s-%d", sid, i), StreamID: sid, TsMs: ts, WallMs: 1_700_000_000_000 + ts, Type: "dog.seen"})
+			}
+			page.Summaries = []protocol.MinuteSummary{{StreamID: sid, MinuteStartMs: 0, WallMs: 1_700_000_000_000, Text: "s"}}
+			_ = json.NewEncoder(w).Encode(page)
+			return
+		}
 		_, _ = io.WriteString(w, `{"query":"`+r.URL.RawQuery+`","tok=`+tok+`":1}`)
 	})
 	mux.HandleFunc("GET /internal/sessions/{id}/ws", func(w http.ResponseWriter, r *http.Request) {

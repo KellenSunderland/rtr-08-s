@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"time"
 
@@ -33,6 +34,8 @@ const (
 	jpegQuality     = 80
 	maxBody         = 16 << 10
 	maxProxyRespLen = 8 << 20
+
+	defaultHistoryLimit = 50
 )
 
 // Deps are the server's collaborators.
@@ -485,47 +488,148 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 
 // ---- proxies to the agent
 
+// proxyHistory serves GET /v1/history. With ?session_id= the query is scoped to that
+// session: since_ms/until_ms become optional (default: the session so far) and, unless
+// stream_id narrows it, the query covers every stream of the session.
 func (s *Server) proxyHistory(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	_, hs, ok1 := intParam(r, "since_ms")
-	_, hu, ok2 := intParam(r, "until_ms")
+	since, hs, ok1 := intParam(r, "since_ms")
+	until, hu, ok2 := intParam(r, "until_ms")
 	lim, hl, ok3 := intParam(r, "limit")
-	if !hs || !hu || !ok1 || !ok2 || !ok3 || (hl && (lim < 1 || lim > 200)) || len([]rune(q.Get("q"))) > 500 {
-		auth.WriteError(w, 400, protocol.CodeBadRequest, "since_ms and until_ms are required; limit 1..200; q <= 500 chars")
+	sid := q.Get("session_id")
+	if (sid == "" && (!hs || !hu)) || !ok1 || !ok2 || !ok3 || (hl && (lim < 1 || lim > 200)) || len([]rune(q.Get("q"))) > 500 {
+		auth.WriteError(w, http.StatusBadRequest, protocol.CodeBadRequest, "since_ms and until_ms are required (optional with session_id); limit 1..200; q <= 500 chars")
 		return
 	}
+	p := auth.FromContext(r.Context())
 	if id := q.Get("stream_id"); id != "" {
-		if st, ok := s.Streams.Get(id); !ok || st.Owner != auth.FromContext(r.Context()) {
+		if st, ok := s.Streams.Get(id); !ok || st.Owner != p {
 			auth.WriteError(w, 404, protocol.CodeNotFound, "stream not found")
 			return
 		}
 	}
-	s.proxy(w, r, "/v1/history")
+	var sess *session.Session
+	if sid != "" {
+		ss, ok := s.Sessions.Get(sid)
+		if !ok || ss.Owner != p {
+			auth.WriteError(w, 404, protocol.CodeNotFound, "session not found")
+			return
+		}
+		sess = ss
+		if !hu {
+			until = sess.NowMs()
+		}
+		if !hs {
+			since = 0
+		}
+	}
+	if until < since {
+		auth.WriteError(w, http.StatusBadRequest, protocol.CodeBadRequest, "until_ms < since_ms")
+		return
+	}
+	q.Set("since_ms", strconv.FormatInt(since, 10))
+	q.Set("until_ms", strconv.FormatInt(until, 10))
+	q.Del("session_id")
+	if sess == nil || q.Get("stream_id") != "" {
+		s.proxy(w, r, "/v1/history", q)
+		return
+	}
+	if !hl {
+		lim = defaultHistoryLimit
+	}
+	s.sessionHistory(w, r, sess, q, int(lim))
+}
+
+// sessionHistory fans the query out to the agent once per session stream and merges
+// the pages, newest first, keeping at most limit events.
+func (s *Server) sessionHistory(w http.ResponseWriter, r *http.Request, sess *session.Session, q url.Values, limit int) {
+	merged := historyPage{Events: []protocol.SceneEvent{}, Summaries: []protocol.MinuteSummary{}}
+	for _, id := range sess.StreamIDs {
+		sq := url.Values{}
+		for k, v := range q {
+			sq[k] = v
+		}
+		sq.Set("stream_id", id)
+		page, status, err := s.fetchHistory(r, sq)
+		if err != nil {
+			s.Log.Warn("agent history failed", "stream", id, "status", status, "err", err)
+			auth.WriteError(w, http.StatusBadGateway, protocol.CodeUpstream, "agent unavailable")
+			return
+		}
+		merged.Events = append(merged.Events, page.Events...)
+		merged.Summaries = append(merged.Summaries, page.Summaries...)
+		merged.Truncated = merged.Truncated || page.Truncated
+	}
+	sort.SliceStable(merged.Events, func(i, j int) bool { return merged.Events[i].TsMs > merged.Events[j].TsMs })
+	sort.SliceStable(merged.Summaries, func(i, j int) bool {
+		return merged.Summaries[i].MinuteStartMs > merged.Summaries[j].MinuteStartMs
+	})
+	if len(merged.Events) > limit {
+		merged.Events = merged.Events[:limit]
+		merged.Truncated = true
+	}
+	writeJSON(w, http.StatusOK, merged)
+}
+
+// historyPage is the GET /v1/history response body (openapi HistoryPage).
+type historyPage struct {
+	Events    []protocol.SceneEvent    `json:"events"`
+	Summaries []protocol.MinuteSummary `json:"summaries"`
+	Truncated bool                     `json:"truncated"`
+}
+
+// fetchHistory performs one GET /v1/history against the agent and decodes the page.
+func (s *Server) fetchHistory(r *http.Request, q url.Values) (historyPage, int, error) {
+	var page historyPage
+	req, err := s.agentRequest(r, "/v1/history", q)
+	if err != nil {
+		return page, 0, err
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return page, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return page, resp.StatusCode, fmt.Errorf("agent status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxProxyRespLen)).Decode(&page); err != nil {
+		return page, resp.StatusCode, err
+	}
+	return page, resp.StatusCode, nil
 }
 
 func (s *Server) proxyScenarios(w http.ResponseWriter, r *http.Request) {
-	s.proxy(w, r, "/v1/scenarios")
+	s.proxy(w, r, "/v1/scenarios", r.URL.Query())
 }
 
-func (s *Server) proxy(w http.ResponseWriter, r *http.Request, path string) {
+// agentRequest builds an authenticated GET to the agent. The caller's query is
+// forwarded minus our own credentials.
+func (s *Server) agentRequest(r *http.Request, path string, qs url.Values) (*http.Request, error) {
 	base, err := url.Parse(s.AgentURL)
 	if err != nil || base.Host == "" {
-		auth.WriteError(w, 500, protocol.CodeInternal, "agent url misconfigured")
-		return
+		return nil, errors.New("agent url misconfigured")
 	}
 	target := *base
 	target.Path = path
-	qs := r.URL.Query() // the caller's query, minus our own credentials
 	qs.Del("token")
 	qs.Del("access_token")
 	target.RawQuery = qs.Encode()
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
 	if err != nil {
-		auth.WriteError(w, 500, protocol.CodeInternal, "internal error")
-		return
+		return nil, err
 	}
 	req.Header.Set("X-Internal-Token", s.InternalToken)
 	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
+
+func (s *Server) proxy(w http.ResponseWriter, r *http.Request, path string, qs url.Values) {
+	req, err := s.agentRequest(r, path, qs)
+	if err != nil {
+		auth.WriteError(w, 500, protocol.CodeInternal, err.Error())
+		return
+	}
 	resp, err := s.HTTPClient.Do(req)
 	if err != nil {
 		s.Log.Warn("agent proxy failed", "path", path, "err", err)
