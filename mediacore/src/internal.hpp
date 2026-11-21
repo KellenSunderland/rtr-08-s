@@ -80,6 +80,8 @@ class FrameStore {
   // Collects up to `cap` frames in [from, to); *total receives the number matching.
   std::vector<FramePtr> range(uint32_t stream_id, int64_t from_ns, int64_t to_ns, size_t cap,
                               size_t* total) const;
+  // Scene cuts in [from, to), oldest first, at most `cap`.
+  std::vector<FramePtr> cuts(uint32_t stream_id, int64_t from_ns, int64_t to_ns, size_t cap) const;
   void prune(int64_t now_ns);
   void remove_stream(uint32_t stream_id);
   mc_frame_store_stats stats() const;
@@ -87,6 +89,7 @@ class FrameStore {
  private:
   struct Stream {
     std::deque<std::shared_ptr<StoredFrame>> frames;
+    std::deque<std::shared_ptr<StoredFrame>> cuts;  // ascending ts, capped
     int64_t last_ts = 0;
     bool has_last = false;
   };
