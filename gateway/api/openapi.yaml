@@ -95,10 +95,15 @@ paths:
   /v1/history:
     get:
       summary: Query the 1h history (proxied to the agent)
+      description: |
+        With `session_id` the query is scoped to that session: `since_ms`/`until_ms` become optional
+        (default: the session so far) and, unless `stream_id` is given, the query covers every stream
+        of the session (results merged newest first, at most `limit`).
       parameters:
         - { name: stream_id, in: query, schema: { type: string } }
-        - { name: since_ms, in: query, required: true, schema: { type: integer } }
-        - { name: until_ms, in: query, required: true, schema: { type: integer } }
+        - { name: session_id, in: query, schema: { type: string, format: uuid } }
+        - { name: since_ms, in: query, schema: { type: integer }, description: "required unless session_id is given" }
+        - { name: until_ms, in: query, schema: { type: integer }, description: "required unless session_id is given" }
         - { name: q, in: query, schema: { type: string, maxLength: 500 } }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
       responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/HistoryPage" } } } } }
