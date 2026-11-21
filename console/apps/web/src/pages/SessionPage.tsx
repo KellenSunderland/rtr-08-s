@@ -70,7 +70,7 @@ export function SessionPage() {
 
       <div className="grid">
         {tiles.map((s) => (
-          <FrameTile key={s.id} stream={s} seekTs={seekTs} />
+          <FrameTile key={s.id} stream={s} seekTs={seekTs} events={state.events} />
         ))}
       </div>
 

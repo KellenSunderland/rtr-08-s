@@ -7,10 +7,12 @@ export const FRAME_POLL_MS = 500;
 /**
  * Live thumbnail: polls the frame endpoint every 500 ms (backoff on error). When `seekTs` is a number,
  * polling pauses and a single frame at that session-clock timestamp is shown.
- * Returns a blob: URL (the endpoint needs the bearer header, so <img src> cannot hit it directly).
+ * Returns a blob: URL (the endpoint needs the bearer header, so <img src> cannot hit it directly) and the
+ * timestamp of the frame shown (`X-Frame-Ts-Ms`, null if the gateway did not send it).
  */
 export function useFrame(api: ApiClient, streamId: string, seekTs: number | null, maxW = 320) {
   const [url, setUrl] = useState<string | null>(null);
+  const [tsMs, setTsMs] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const current = useRef<string | null>(null);
 
@@ -18,17 +20,18 @@ export function useFrame(api: ApiClient, streamId: string, seekTs: number | null
     const ctl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
-    const show = (blob: Blob) => {
+    const show = ({ blob, tsMs }: { blob: Blob; tsMs: number | null }) => {
       const next = URL.createObjectURL(blob);
       if (current.current) URL.revokeObjectURL(current.current);
       current.current = next;
       setUrl(next);
+      setTsMs(tsMs);
     };
     const tick = async () => {
       let delay = FRAME_POLL_MS;
       try {
         show(
-          await api.fetchFrame(
+          await api.fetchFrameWithTs(
             streamId,
             { max_w: maxW, ...(seekTs !== null ? { ts_ms: seekTs } : {}) },
             ctl.signal,
@@ -56,7 +59,7 @@ export function useFrame(api: ApiClient, streamId: string, seekTs: number | null
     },
     [],
   );
-  return { url, error };
+  return { url, tsMs, error };
 }
 
 export function useInterval(fn: () => void, ms: number) {

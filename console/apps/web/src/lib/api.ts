@@ -7,6 +7,7 @@ import {
   SessionInfo,
   StreamInfo,
 } from "@argus/protocol";
+import { intHeader } from "./overlay";
 
 export interface ApiConfig {
   baseUrl: string;
@@ -114,6 +115,16 @@ export class ApiClient {
   ): Promise<Blob> {
     const res = await this.request(ApiClient.framePath(id, opts), { signal });
     return res.blob();
+  }
+
+  /** Like fetchFrame, plus the timestamp of the frame actually returned (nearest to `ts_ms`). */
+  async fetchFrameWithTs(
+    id: string,
+    opts: { ts_ms?: number; max_w?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<{ blob: Blob; tsMs: number | null }> {
+    const res = await this.request(ApiClient.framePath(id, opts), { signal });
+    return { blob: await res.blob(), tsMs: intHeader(res.headers, "X-Frame-Ts-Ms") };
   }
 
   /**
