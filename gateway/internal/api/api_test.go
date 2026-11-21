@@ -143,6 +143,53 @@ func TestStreamCRUDQuotaAndIsolation(t *testing.T) {
 	e.addStream("cam4", "fake://16x16@20", tokA) // quota released
 }
 
+func TestFrameIndex(t *testing.T) {
+	e := newEnv(t)
+	e.addStream("cam1", "fake://32x24@50", tokA)
+	e.waitFrames("cam1", 20)
+
+	type index struct {
+		StreamID string `json:"stream_id"`
+		Frames   []struct {
+			TsMs   int64 `json:"ts_ms"`
+			WallMs int64 `json:"wall_ms"`
+			W      int   `json:"w"`
+			H      int   `json:"h"`
+		} `json:"frames"`
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
+	}
+	var idx index
+	_ = json.Unmarshal(e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0&to_ms=3600000", tokA, nil), 200), &idx)
+	if idx.StreamID != "cam1" || len(idx.Frames) < 20 || idx.Truncated || idx.Total != len(idx.Frames) {
+		t.Fatalf("index: %+v", idx)
+	}
+	for i, f := range idx.Frames {
+		if f.W != 32 || f.H != 24 || f.WallMs < 1_600_000_000_000 {
+			t.Fatalf("entry %d: %+v", i, f)
+		}
+		if i > 0 && f.TsMs < idx.Frames[i-1].TsMs {
+			t.Fatalf("not ordered at %d", i)
+		}
+	}
+	// the index agrees with the frame endpoint's clock
+	resp := e.do("GET", "/v1/streams/cam1/frame?ts_ms="+strconv.FormatInt(idx.Frames[5].TsMs, 10), tokA, nil)
+	e.mustStatus(resp, 200)
+	if got, _ := strconv.ParseInt(resp.Header.Get("X-Frame-Ts-Ms"), 10, 64); got != idx.Frames[5].TsMs {
+		t.Fatalf("frame ts %d, index ts %d", got, idx.Frames[5].TsMs)
+	}
+
+	_ = json.Unmarshal(e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0&to_ms=3600000&limit=3", tokA, nil), 200), &idx)
+	if len(idx.Frames) != 3 || !idx.Truncated || idx.Total < 20 {
+		t.Fatalf("limited index: %+v", idx)
+	}
+	e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0", tokA, nil), 400)
+	e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=10&to_ms=10", tokA, nil), 400)
+	e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0&to_ms=3600001", tokA, nil), 400)
+	e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0&to_ms=10&limit=0", tokA, nil), 400)
+	e.mustStatus(e.do("GET", "/v1/streams/cam1/frames?from_ms=0&to_ms=10", tokB, nil), 404)
+}
+
 func TestFrameNearestTimestamp(t *testing.T) {
 	e := newEnv(t)
 	e.addStream("cam1", "fake://64x48@20", tokA)

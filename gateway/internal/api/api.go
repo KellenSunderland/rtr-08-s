@@ -33,6 +33,10 @@ const (
 	jpegQuality     = 80
 	maxBody         = 16 << 10
 	maxProxyRespLen = 8 << 20
+
+	maxIndexSpanMs     = 60 * 60 * 1000
+	defaultIndexFrames = 1000
+	maxIndexFrames     = 10000
 )
 
 // Deps are the server's collaborators.
@@ -80,6 +84,7 @@ func New(d Deps) *Server {
 	v1.HandleFunc("DELETE /v1/streams/{id}", s.deleteStream)
 	v1.HandleFunc("GET /v1/streams/{id}/frame", s.getFrame)
 	v1.HandleFunc("GET /v1/streams/{id}/clip", s.getClip)
+	v1.HandleFunc("GET /v1/streams/{id}/frames", s.getFrameIndex)
 	v1.HandleFunc("POST /v1/sessions", s.createSession)
 	v1.HandleFunc("GET /v1/sessions", s.listSessions)
 	v1.HandleFunc("GET /v1/sessions/{id}", s.getSession)
@@ -328,6 +333,64 @@ func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Frame-Ts-Ms", strconv.FormatInt((f.TsNs-origin)/1e6, 10))
 	h.Set("X-Frame-Wall-Ms", strconv.FormatInt(f.WallNs/1e6, 10))
 	_, _ = w.Write(jpg)
+}
+
+type frameIndexEntry struct {
+	TsMs   int64 `json:"ts_ms"`
+	WallMs int64 `json:"wall_ms"`
+	W      int   `json:"w"`
+	H      int   `json:"h"`
+}
+
+type frameIndex struct {
+	StreamID  string            `json:"stream_id"`
+	Frames    []frameIndexEntry `json:"frames"`
+	Total     int               `json:"total"`
+	Truncated bool              `json:"truncated"`
+}
+
+// getFrameIndex lists the stored frames of a stream in [from_ms, to_ms) without
+// any image data, so the timeline can show where frames exist (and how dense
+// they are after thinning) before it fetches any of them.
+func (s *Server) getFrameIndex(w http.ResponseWriter, r *http.Request) {
+	st, ok := s.ownedStream(w, r)
+	if !ok {
+		return
+	}
+	from, hf, ok1 := intParam(r, "from_ms")
+	to, ht, ok2 := intParam(r, "to_ms")
+	limit, hl, ok3 := intParam(r, "limit")
+	switch {
+	case !hf || !ht || !ok1 || !ok2 || !ok3:
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "from_ms and to_ms are required integers; limit must be an integer")
+		return
+	case from < 0 || to <= from:
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "require 0 <= from_ms < to_ms")
+		return
+	case to-from > maxIndexSpanMs:
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "index window longer than 1 hour")
+		return
+	case hl && (limit < 1 || limit > maxIndexFrames):
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "limit must be in [1, 10000]")
+		return
+	}
+	if !hl {
+		limit = defaultIndexFrames
+	}
+	origin, ok := s.clockOrigin(w, r)
+	if !ok {
+		return
+	}
+	metas, total, err := s.Streams.Media().RangeMeta(st.Idx, origin+from*1e6, origin+to*1e6, int(limit))
+	if err != nil {
+		auth.WriteError(w, 500, protocol.CodeInternal, "index failed")
+		return
+	}
+	out := frameIndex{StreamID: st.ID, Frames: make([]frameIndexEntry, 0, len(metas)), Total: total, Truncated: total > len(metas)}
+	for _, fm := range metas {
+		out.Frames = append(out.Frames, frameIndexEntry{TsMs: (fm.TsNs - origin) / 1e6, WallMs: fm.WallNs / 1e6, W: fm.W, H: fm.H})
+	}
+	writeJSON(w, 200, out)
 }
 
 type clipEntry struct {

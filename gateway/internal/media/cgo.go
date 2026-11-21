@@ -189,6 +189,31 @@ func (m *CGo) Stats() (Stats, error) {
 	}, nil
 }
 
+func (m *CGo) RangeMeta(id uint32, from, to int64, capN int) ([]FrameMeta, int, error) {
+	if capN <= 0 {
+		return nil, 0, ErrInvalid
+	}
+	views := (*C.mc_frame_view)(C.calloc(C.size_t(capN), C.size_t(unsafe.Sizeof(C.mc_frame_view{}))))
+	if views == nil {
+		return nil, 0, fmt.Errorf("calloc failed")
+	}
+	defer C.free(unsafe.Pointer(views))
+	var n, total C.size_t
+	st := C.mc_frame_store_range(m.store, C.uint32_t(id), C.int64_t(from), C.int64_t(to), views, C.size_t(capN), &n, &total)
+	if st != C.MC_OK {
+		return nil, 0, statusErr(st)
+	}
+	out := make([]FrameMeta, 0, int(n))
+	for _, v := range unsafe.Slice(views, int(n)) {
+		f := v.frame
+		out = append(out, FrameMeta{
+			TsNs: int64(f.ts_ns), WallNs: int64(f.wall_ns),
+			W: int(f.width), H: int(f.height), Seq: uint64(f.seq),
+		})
+	}
+	return out, int(total), nil
+}
+
 func (m *CGo) MotionScore(a, b Frame) float64 {
 	ca, fa, err := toC(a)
 	if err != nil {

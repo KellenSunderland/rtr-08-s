@@ -68,6 +68,30 @@ paths:
       responses:
         "200": { description: zip, content: { application/zip: {} } }
         "400": { $ref: "#/components/responses/Error" }
+  /v1/streams/{id}/frames:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: from_ms, in: query, required: true, schema: { type: integer } }
+      - { name: to_ms, in: query, required: true, schema: { type: integer } }
+      - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 10000 } }
+      - { name: session_id, in: query, schema: { type: string, format: uuid }, description: "interpret ts_ms on this session's clock" }
+    get:
+      summary: Index of stored frames in [from_ms, to_ms) (timestamps and sizes, no image data; max 1 hour)
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stream_id, frames, total, truncated]
+                properties:
+                  stream_id: { type: string }
+                  frames: { type: array, items: { type: object, properties: { ts_ms: { type: integer }, wall_ms: { type: integer }, w: { type: integer }, h: { type: integer } } } }
+                  total: { type: integer }
+                  truncated: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/sessions:
     post:
       summary: Create a conversation session over one or more streams
