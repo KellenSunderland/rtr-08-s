@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +38,7 @@ type env struct {
 	ts    *httptest.Server
 	reg   *streams.Registry
 	agent *fakeAgent
+	exp   string // clip export root
 }
 
 func newEnv(t *testing.T) *env {
@@ -45,10 +48,11 @@ func newEnv(t *testing.T) *env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := streams.NewRegistry(m, streams.URIPolicy{AllowedSchemes: []string{"fake"}}, log)
 	a := auth.New([]auth.TokenSpec{{Name: "a", Token: tokA, MaxStreams: 3, MaxSessions: 1}, {Name: "b", Token: tokB}}, internal)
-	srv := New(Deps{Auth: a, Streams: reg, Sessions: session.NewManager(), AgentURL: agent.srv.URL, InternalToken: internal, Log: log})
+	exp := t.TempDir()
+	srv := New(Deps{Auth: a, Streams: reg, Sessions: session.NewManager(), AgentURL: agent.srv.URL, InternalToken: internal, ExportRoot: exp, Log: log})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); reg.Close(); agent.srv.Close() })
-	return &env{t, ts, reg, agent}
+	return &env{t, ts, reg, agent, exp}
 }
 
 func (e *env) do(method, path, tok string, body any) *http.Response {
@@ -251,6 +255,40 @@ func TestClipExportBounds(t *testing.T) {
 			t.Fatalf("frame ts %d outside [%d,%d]", f.TsMs, from, latest)
 		}
 	}
+}
+
+func TestClipExportToNamedDirectory(t *testing.T) {
+	e := newEnv(t)
+	e.addStream("cam1", "fake://32x24@20", tokA)
+	e.waitFrames("cam1", 30)
+	resp := e.do("GET", "/v1/streams/cam1/frame", tokA, nil)
+	e.mustStatus(resp, 200)
+	latest, _ := strconv.ParseInt(resp.Header.Get("X-Frame-Ts-Ms"), 10, 64)
+	from := max(latest-1000, 0)
+	q := "?from_ms=" + strconv.FormatInt(from, 10) + "&to_ms=" + strconv.FormatInt(latest+1, 10) + "&fps=4"
+
+	body := e.mustStatus(e.do("POST", "/v1/streams/cam1/clip/export"+q+"&name=weekend", tokA, nil), 201)
+	var out struct {
+		Path   string `json:"path"`
+		Frames int    `json:"frames"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Frames < 3 || !strings.HasPrefix(out.Path, "weekend") {
+		t.Fatalf("unexpected response %+v", out)
+	}
+	zb, err := os.ReadFile(filepath.Join(e.exp, out.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zip.NewReader(bytes.NewReader(zb), int64(len(zb))); err != nil {
+		t.Fatalf("exported file is not a zip: %v", err)
+	}
+
+	e.mustStatus(e.do("POST", "/v1/streams/cam1/clip/export"+q, tokA, nil), 400)                                  // name required
+	e.mustStatus(e.do("POST", "/v1/streams/cam1/clip/export"+q+"&name="+strings.Repeat("x", 65), tokA, nil), 400) // too long
+	e.mustStatus(e.do("POST", "/v1/streams/cam1/clip/export"+q+"&name=weekend", tokB, nil), 404)                  // not the owner
 }
 
 func TestSessionCRUDAndQuota(t *testing.T) {

@@ -13,8 +13,8 @@ import (
 // URIPolicy is the stream URI allow-list.
 type URIPolicy struct {
 	MediaRoot      string
-	AllowedSchemes []string // file, device, rtsp, http, https (and fake for tests/dev)
-	AllowedHosts   []string // for rtsp/http/https; empty = no remote hosts allowed
+	AllowedSchemes []string // file, device, rtsp, rtmp, rtmps, srt, http, https (and fake for tests/dev)
+	AllowedHosts   []string // for rtsp/rtmp/rtmps/srt/http/https; empty = no remote hosts allowed
 }
 
 // URIError is a validation failure (maps to HTTP 400).
@@ -83,10 +83,30 @@ func (p URIPolicy) Validate(uri string) (string, error) {
 			return "", bad("host %q is not allowed", u.Hostname())
 		}
 		return uri, nil
+	case "rtmp", "rtmps", "srt":
+		return p.validateIngest(uri, scheme)
 	case "fake":
 		return uri, nil
 	}
 	return "", bad("unsupported scheme %q", scheme)
+}
+
+// validateIngest validates the push-style ingest schemes (rtmp, rtmps, srt).
+// Operators opt in per scheme through AllowedSchemes.
+func (p URIPolicy) validateIngest(uri, scheme string) (string, error) {
+	u, err := url.Parse(uri)
+	if err != nil || u.Hostname() == "" {
+		return "", bad("invalid %s uri", scheme)
+	}
+	if u.User != nil {
+		return "", bad("credentials in uri are not allowed")
+	}
+	// Ingest endpoints are addressed by host:port; an explicit port means the
+	// operator is pointing at a specific media server.
+	if u.Port() == "" && !p.hostAllowed(u.Hostname()) {
+		return "", bad("host %q is not allowed", u.Hostname())
+	}
+	return uri, nil
 }
 
 func (p URIPolicy) validateFile(uri string) (string, error) {
