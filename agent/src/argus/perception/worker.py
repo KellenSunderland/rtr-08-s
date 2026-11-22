@@ -19,6 +19,7 @@ import websockets
 from argus.clock import SessionClock
 from argus.memory.store import MemoryStore
 from argus.metrics import Metrics
+from argus.perception.limiter import SNAPSHOT_TYPE, EventLimiter
 from argus.perception.sanitize import Sanitizer
 from argus.protocol import Actor, BBox, FrameRef, SceneEvent
 from argus.providers.base import Frame, FrameMeta, Observation, ProviderError, VisionModel
@@ -30,7 +31,6 @@ log = logging.getLogger(__name__)
 HEADER = struct.Struct("<Iqi")  # uint32 stream_idx, int64 ts_ms, int32 jpeg_len (16 bytes)
 MAX_BINARY = 256 * 1024
 MAX_SUMMARY = 500
-SNAPSHOT_TYPE = "state.snapshot"  # derived by the agent from State, never accepted from the model
 FrameSource = AsyncIterator[Frame]
 
 
@@ -98,6 +98,7 @@ class PerceptionWorker:
         state: ScenarioState | None = None,
         metrics: Metrics | None = None,
         sanitizer: Sanitizer | None = None,
+        limiter: EventLimiter | None = None,
         on_frame: Callable[[Frame], None] | None = None,
         buffer_batches: int = 4,
         flush_after_s: float | None = None,
@@ -112,6 +113,7 @@ class PerceptionWorker:
         self.state = state
         self.metrics = metrics or Metrics()
         self.sanitizer = sanitizer or Sanitizer()
+        self.limiter = limiter or EventLimiter(pack, stream_id, self.metrics)
         self.on_frame = on_frame
         self.batch = pack.sampling.batch_frames
         self._buf: deque[Frame] = deque(maxlen=self.batch * buffer_batches)
@@ -207,16 +209,26 @@ class PerceptionWorker:
             return []
         events = [ev for o in obs if (ev := self.build_event(o, frames)) is not None]
         events.sort(key=lambda e: e.ts_ms)  # stable: fixture/model order preserved within a ts
-        if events and self.store is not None:
-            self.store.add_events(events)
+        decisions = self.limiter.process(events)
+        fresh = [d.event for d in decisions if d.action == "emit"]
+        if fresh and self.store is not None:
+            self.store.add_events(fresh)
         out: list[SceneEvent] = []
-        for ev in events:
-            out.append(ev)
-            await self._emit(ev)
-            snap = self._apply_state(ev)
-            if snap is not None:
-                out.append(snap)
-                await self._emit(snap)
+        for d in decisions:
+            if d.action == "collapse" and d.target is not None:
+                if self.store is not None:
+                    self.store.update_attrs(d.target.id, d.target.attrs)
+                if d.crossed:  # same id, updated attrs: consumers replace the earlier event
+                    self.metrics.inc("argus_event_updates_total", stream=self.stream_id)
+                    await self.on_event(d.target.model_copy(deep=True))
+            elif d.action == "emit":
+                ev = d.event
+                out.append(ev)
+                await self._emit(ev)
+                snap = self._apply_state(ev)
+                if snap is not None:
+                    out.append(snap)
+                    await self._emit(snap)
         return out
 
     async def _emit(self, ev: SceneEvent) -> None:

@@ -78,3 +78,6 @@ class Sampling:
     min_motion: float = 0.02
     max_interval_ms: int = 5000
     batch_frames: int = 3
+    event_cooldown_s: float = 30.0  # collapse same-type events within this window (0 disables)
+    cooldowns: dict[str, float] = field(default_factory=dict)  # per-type overrides
+    max_events_per_minute: int = 60  # per-stream cap; lowest-confidence dropped first

@@ -147,6 +147,10 @@ class MemoryStore:
                 raise
         return n
 
+    def update_attrs(self, event_id: str, attrs: dict[str, Any]) -> None:
+        with self._lock:
+            self.db.execute("UPDATE events SET attrs_json=? WHERE id=?", (json.dumps(attrs), event_id))
+
     def add_summary(self, s: MinuteSummary) -> bool:
         """Insert a minute summary; returns False if one already exists for (stream, minute)."""
         with self._lock:
