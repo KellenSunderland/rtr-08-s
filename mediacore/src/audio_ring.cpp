@@ -21,7 +21,7 @@ void AudioRing::push(const int16_t* samples, size_t frames) {
   if (samples == nullptr) fail(MC_ERR_INVALID_ARG, "null samples");
   std::lock_guard<std::mutex> lk(mu_);
   if (frames >= capacity_) {
-    dropped_ += size_ + (frames - capacity_);
+    on_drop(size_ + (frames - capacity_));
     const int16_t* src = samples + (frames - capacity_) * channels_;
     std::memcpy(buf_.data(), src, capacity_ * channels_ * sizeof(int16_t));
     head_ = 0;
@@ -30,7 +30,7 @@ void AudioRing::push(const int16_t* samples, size_t frames) {
   }
   if (size_ + frames > capacity_) {
     const size_t over = size_ + frames - capacity_;
-    dropped_ += over;
+    on_drop(over);
     head_ = (head_ + over) % capacity_;
     size_ -= over;
   }
@@ -63,7 +63,7 @@ size_t AudioRing::available() const {
 }
 uint64_t AudioRing::dropped() const {
   std::lock_guard<std::mutex> lk(mu_);
-  return dropped_;
+  return dropped_total();
 }
 void AudioRing::clear() {
   std::lock_guard<std::mutex> lk(mu_);
