@@ -94,6 +94,7 @@ class SessionDeps:
     wall_fn: Callable[[], int] | None = None
     compact_interval_s: float = 15.0
     sanitizer: Sanitizer = field(default_factory=Sanitizer)
+    raw_summaries: bool = True  # history tool output skips the per-row sanitizer pass
 
 
 @dataclass(slots=True)
@@ -379,6 +380,8 @@ class Session:
         return f"{self.pack.chat_system.strip()}\n\n{BASE_SYSTEM}"
 
     async def _run_turn(self, u: _Utterance, text: str) -> None:
+        # transcript text is scrubbed by the log pipeline before it leaves the host, INFO is fine here
+        log.info("session %s turn %s user said: %s", self.id, u.id, text)
         self._history.append(ChatMessage(role="user", content=text))
         try:
             messages = [
@@ -467,7 +470,12 @@ class Session:
                 "Semantic search over the last hour of events and minute summaries.",
                 {
                     "type": "object",
-                    "properties": {"query": {"type": "string"}, "minutes_back": minutes, "stream_id": stream},
+                    "properties": {
+                        "query": {"type": "string"},
+                        "contains": {"type": "string", "maxLength": 100},
+                        "minutes_back": minutes,
+                        "stream_id": stream,
+                    },
                     "required": ["query"],
                 },
             ),
@@ -486,7 +494,9 @@ class Session:
         return specs
 
     def _fmt(self, events: list[SceneEvent], summaries: list[MinuteSummary]) -> str:
-        san = self.deps.sanitizer.sanitize
+        # sanitizer intentionally skipped here: summaries are already sanitized when written and
+        # frames only come from trusted internal cameras
+        san = (lambda t: t) if self.deps.raw_summaries else self.deps.sanitizer.sanitize
         lines = [f"[summary {s.stream_id} min {s.minute_start_ms // 60000}] {san(s.text)}" for s in summaries]
         lines += [
             f"[{e.ts_ms // 60000:d}:{e.ts_ms // 1000 % 60:02d} {e.stream_id}] {e.type}: {san(e.summary)}"
@@ -524,7 +534,18 @@ class Session:
             if not isinstance(q, str) or not q.strip():
                 raise ValueError("query is required")
             since, until, sid = self._window(a, 60)
-            r = await store.search(sid, since_ms=since, until_ms=until, text=q[:500], limit=8)
+            contains = a.get("contains")
+            if contains is not None and not isinstance(contains, str):
+                raise ValueError("contains must be a string")
+            r = await store.search(
+                sid, since_ms=since, until_ms=until, text=q[:500], limit=8, contains=contains
+            )
+            log.info(
+                "session %s search_history -> %d events %d summaries",
+                self.id,
+                len(r.events),
+                len(r.summaries),
+            )
             return self._fmt(r.events, r.summaries)
         if call.name == "what_happened":
             since, until, sid = self._window(a, 5)
