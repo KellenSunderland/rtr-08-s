@@ -103,3 +103,17 @@ async def test_compactor_keeps_high_severity(store, providers, packs):
     assert [m.minute_start_ms for m in made] == [60_000]
     r = await store.search("cam", since_ms=0, until_ms=2_000_000)
     assert len(r.summaries) == 2
+
+
+async def test_contains_filter_narrows_candidates(store):
+    store.add_events(
+        [mk("dog eats from the bowl", 1000), mk("person at the door", 2000), mk("it's a dog's day", 3000)]
+    )
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, contains="dog")
+    assert [e.summary for e in r.events] == ["dog eats from the bowl", "it's a dog's day"]
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, text="door", contains="person")
+    assert [e.summary for e in r.events] == ["person at the door"]
+    assert [e.ts_ms for e in store.events_in(None, 0, 2_000_000, order_by="ts_ms")] == [1000, 2000, 3000]
+    assert store.events_in(
+        None, 0, 2_000_000, order_by="ts_ms; DROP TABLE events"
+    )  # unknown column -> wall_ms

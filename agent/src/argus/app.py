@@ -135,12 +135,19 @@ def create_app(
         stream_id: Annotated[str | None, Query(max_length=64)] = None,
         q: Annotated[str | None, Query(max_length=500)] = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        contains: Annotated[str | None, Query(max_length=200)] = None,
     ) -> dict[str, Any]:
         if stream_id is not None and not STREAM_ID_RE.match(stream_id):
             raise HTTPException(400, "invalid stream_id")
         if until_ms < since_ms:
             raise HTTPException(400, "until_ms < since_ms")
-        r = await store.search(stream_id, since_ms=since_ms, until_ms=until_ms, text=q, limit=limit)
+        r = await store.search(
+            stream_id, since_ms=since_ms, until_ms=until_ms, text=q, limit=limit, contains=contains
+        )
+        log.info(
+            "history stream=%s window=%d..%d q=%d chars contains=%d chars -> %d events %d summaries",
+            stream_id, since_ms, until_ms, len(q or ""), len(contains or ""), len(r.events), len(r.summaries),
+        )  # fmt: skip
         return {
             "events": [e.wire() for e in r.events],
             "summaries": [x.wire() for x in r.summaries],
