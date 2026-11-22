@@ -74,6 +74,77 @@ export function bucketByMinute(
   return buckets;
 }
 
+export type ZoomLevel = "15m" | "30m" | "1h";
+export const ZOOM_LEVELS: readonly ZoomLevel[] = ["15m", "30m", "1h"];
+const ZOOM_SPAN_MS: Record<ZoomLevel, number> = {
+  "15m": 15 * MINUTE_MS,
+  "30m": 30 * MINUTE_MS,
+  "1h": WINDOW_MS,
+};
+/** The heat strip always has this many cells, whatever the zoom level. */
+export const STRIP_CELLS = 30;
+
+/** The trailing window for a zoom level, ending at `nowMs` (same clamping as `lastHour`). */
+export function zoomWindow(nowMs: number, zoom: ZoomLevel): TimeWindow {
+  const endMs = Math.max(0, Math.floor(nowMs));
+  return { startMs: Math.max(0, endMs - ZOOM_SPAN_MS[zoom]), endMs };
+}
+
+/**
+ * Event counts per heat-strip cell across the window (`cells` equal-width cells, oldest first).
+ * Unlike `inWindow`, the right edge is inclusive here: an event stamped exactly at `endMs`
+ * (the newest possible one) is counted in the last cell instead of being dropped.
+ */
+export function densityStrip(
+  events: readonly Pick<SceneEvent, "ts_ms">[],
+  w: TimeWindow,
+  cells = STRIP_CELLS,
+): number[] {
+  const counts = new Array<number>(cells).fill(0);
+  const span = w.endMs - w.startMs;
+  if (span <= 0) return counts;
+  const cellMs = span / cells;
+  for (const e of events) {
+    if (e.ts_ms < w.startMs || e.ts_ms > w.endMs) continue;
+    const fromEnd = Math.floor((w.endMs - e.ts_ms) / cellMs);
+    const idx = cells - 1 - fromEnd;
+    if (idx >= 0) counts[idx] = (counts[idx] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** Heat level 0..4 for a cell: 0 only when empty, 4 at the busiest cell. */
+export function heatLevel(count: number, max: number): number {
+  if (count <= 0 || max <= 0) return 0;
+  return Math.min(4, Math.max(1, Math.ceil((count / max) * 4)));
+}
+
+export interface DensityCache {
+  zoom: ZoomLevel;
+  endMs: number;
+  counts: number[];
+}
+const DENSITY_KEY = "argus.console.density";
+
+/** Last strip we rendered, so a reload shows something before `history.result` arrives. */
+export function loadDensityCache(storage: Pick<Storage, "getItem"> = localStorage): DensityCache | null {
+  let cache: DensityCache | null = null;
+  try {
+    const raw = storage.getItem(DENSITY_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as DensityCache;
+      if (Array.isArray(p.counts) && ZOOM_LEVELS.includes(p.zoom)) cache = p;
+    }
+  } catch {
+    cache = null;
+  }
+  return cache;
+}
+
+export function saveDensityCache(c: DensityCache, storage: Pick<Storage, "setItem"> = localStorage): void {
+  storage.setItem(DENSITY_KEY, JSON.stringify(c));
+}
+
 /** Empty `types` set means "no filter". */
 export function filterByType<T extends { type: string }>(
   items: readonly T[],

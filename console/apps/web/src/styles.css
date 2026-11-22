@@ -197,6 +197,36 @@ figcaption {
   border-right: 1px solid #0d1014;
   min-height: 2px;
 }
+.heat {
+  position: relative;
+  display: flex;
+  height: 10px;
+  margin-top: 4px;
+  gap: 1px;
+}
+.heat .cell {
+  flex: 1;
+  background: #161b22;
+}
+.heat .h1 {
+  background: #1b4a3a;
+}
+.heat .h2 {
+  background: #26734f;
+}
+.heat .h3 {
+  background: #3aa66a;
+}
+.heat .h4 {
+  background: #6ee7a0;
+}
+.heat .mark {
+  position: absolute;
+  top: -3px;
+  width: 1px;
+  height: 16px;
+  background: #ffd43b;
+}
 .cursor {
   position: absolute;
   top: 0;

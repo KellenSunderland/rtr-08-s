@@ -1,13 +1,20 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { MinuteSummary, SceneEvent } from "@argus/protocol";
 import {
   bucketByMinute,
+  densityStrip,
   filterByType,
   fromFraction,
+  heatLevel,
   inWindow,
-  lastHour,
+  loadDensityCache,
+  saveDensityCache,
   toFraction,
+  zoomWindow,
   MAX_EVENTS,
+  STRIP_CELLS,
+  ZOOM_LEVELS,
+  type ZoomLevel,
 } from "../lib/timeline";
 
 const formatWall = (ms: number) => new Date(ms).toLocaleTimeString();
@@ -25,7 +32,9 @@ export function Timeline({ events, summaries, nowMs, seekTs, onSeek }: Props) {
   const [types, setTypes] = useState<Set<string>>(new Set());
   const [hover, setHover] = useState<{ x: number; text: string } | null>(null);
   const track = useRef<HTMLDivElement>(null);
-  const w = useMemo(() => lastHour(nowMs), [nowMs]);
+  const [cache] = useState(() => loadDensityCache());
+  const [zoom, setZoom] = useState<ZoomLevel>(cache?.zoom ?? "1h");
+  const w = useMemo(() => zoomWindow(nowMs, zoom), [nowMs, zoom]);
 
   const allTypes = useMemo(() => [...new Set(events.map((e) => e.type))].sort(), [events]);
   const filtered = useMemo(() => filterByType(events, types), [events, types]);
@@ -39,6 +48,21 @@ export function Timeline({ events, summaries, nowMs, seekTs, onSeek }: Props) {
     [filtered, w, summaries],
   );
   const max = Math.max(1, ...buckets.map((b) => b.count));
+
+  const counts = useMemo(() => {
+    if (events.length === 0 && cache?.zoom === zoom) return cache.counts;
+    return densityStrip(
+      filtered.map((e) => ({ ts_ms: e.wall_ms })),
+      w,
+    );
+  }, [events.length, cache, zoom, filtered, w]);
+  const peak = Math.max(0, ...counts);
+  const countsKey = counts.join(",");
+  useEffect(() => {
+    if (events.length > 0)
+      saveDensityCache({ zoom, endMs: w.endMs, counts: countsKey.split(",").map(Number) });
+  }, [events.length, zoom, w.endMs, countsKey]);
+  const marks = summaries.filter((s) => inWindow(s.minute_start_ms, w));
 
   const tsAt = (clientX: number): number | null => {
     const r = track.current?.getBoundingClientRect();
@@ -68,7 +92,7 @@ export function Timeline({ events, summaries, nowMs, seekTs, onSeek }: Props) {
       <h3>
         Timeline{" "}
         <span className="muted small">
-          last hour · {events.length}/{MAX_EVENTS} events
+          last {zoom} · {events.length}/{MAX_EVENTS} events
         </span>
         {seekTs !== null && (
           <button className="small" onClick={() => onSeek(null)}>
@@ -76,6 +100,18 @@ export function Timeline({ events, summaries, nowMs, seekTs, onSeek }: Props) {
           </button>
         )}
       </h3>
+      <div className="chips" role="group" aria-label="Zoom level">
+        {ZOOM_LEVELS.map((z) => (
+          <button
+            key={z}
+            className={`chip${z === zoom ? " on" : ""}`}
+            aria-pressed={z === zoom}
+            onClick={() => setZoom(z)}
+          >
+            {z}
+          </button>
+        ))}
+      </div>
       <div className="chips">
         {allTypes.map((t) => (
           <button
@@ -132,6 +168,18 @@ export function Timeline({ events, summaries, nowMs, seekTs, onSeek }: Props) {
             {hover.text}
           </div>
         )}
+      </div>
+      <div className="heat" role="img" aria-label="Event density" data-cells={STRIP_CELLS}>
+        {counts.map((c, i) => (
+          <span key={i} className={`cell h${heatLevel(c, peak)}`} title={`${c} events`} />
+        ))}
+        {marks.map((s) => (
+          <i
+            key={`${s.stream_id}@${s.minute_start_ms}`}
+            className="mark"
+            style={{ left: `${toFraction(s.minute_start_ms, w) * 100}%` }}
+          />
+        ))}
       </div>
       <div className="axis muted small">
         <span>{formatWall(w.startMs)}</span>
