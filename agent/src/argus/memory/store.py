@@ -9,10 +9,12 @@ Time-window semantics (CONTRACTS.md "History time domain"): ``since_ms <= wall_m
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ from argus.providers.base import Embedder
 
 SCHEMA_VERSION = "1"
 MINUTE_MS = 60_000
-W_COS, W_RECENCY = 0.7, 0.3
+W_RECENCY = 0.3  # default weight of the recency term; the cosine term gets 1 - W_RECENCY
 _MAX_CANDIDATES = 5000
 
 
@@ -38,6 +40,18 @@ class SearchResult:
     summaries: list[MinuteSummary] = field(default_factory=list)
     truncated: bool = False
     scores: dict[str, float] = field(default_factory=dict)  # event id -> rerank score (text queries)
+
+
+def _dedupe_key(e: SceneEvent) -> tuple[str, str, int]:
+    """Events of one type tracking the same object on one stream are reports of the same thing."""
+    track: Any = e.attrs.get("track")
+    return (e.stream_id, e.type, track["id"])
+
+
+def _dedupe(events: list[SceneEvent]) -> list[SceneEvent]:
+    """Keep the first (best-ranked) event per dedupe key, preserving order."""
+    seen: set[tuple[str, str, int]] = set()
+    return [e for e in events if (k := _dedupe_key(e)) not in seen and seen.add(k) is None]
 
 
 def _blob(v: list[float]) -> bytes:
@@ -235,16 +249,21 @@ class MemoryStore:
             ).fetchall()
         return [self._row_event(r) for r in rows]
 
-    def _events_rows(self, stream_id: str | None, since_ms: int, until_ms: int) -> list[sqlite3.Row]:
+    def _events_rows(
+        self, stream_id: str | None, since_ms: int, until_ms: int, types: Sequence[str] | None = None
+    ) -> list[sqlite3.Row]:
         sql = "SELECT * FROM events WHERE wall_ms>=? AND wall_ms<?"
         args: list[Any] = [since_ms, until_ms]
         if stream_id is not None:
             sql += " AND stream_id=?"
             args.append(stream_id)
+        if types:
+            sql += " AND type IN (SELECT value FROM json_each(?))"
+            args.append(json.dumps(list(types)))
         return self.db.execute(sql + " ORDER BY wall_ms, ts_ms, rowid", args).fetchall()
 
     def _summary_rows(self, stream_id: str | None, since_ms: int, until_ms: int) -> list[sqlite3.Row]:
-        sql = "SELECT rowid AS rid, * FROM minute_summaries WHERE wall_ms>=? AND wall_ms<?"
+        sql = "SELECT rowid AS rid, * FROM minute_summaries WHERE wall_ms>? AND wall_ms<? AND event_count>0"
         args: list[Any] = [since_ms, until_ms]
         if stream_id is not None:
             sql += " AND stream_id=?"
@@ -277,12 +296,20 @@ class MemoryStore:
         until_ms: int,
         text: str | None = None,
         limit: int = 50,
+        recency_weight: float = W_RECENCY,
+        types: Sequence[str] | None = None,
+        dedupe: bool = False,
     ) -> SearchResult:
-        """Time-window filter, then (if ``text``) vector top-k re-ranked by ``0.7*cos + 0.3*recency``.
+        """Time-window filter, then (if ``text``) vector top-k re-ranked by
+        ``(1-recency_weight)*cos + recency_weight*recency``.
 
         ``recency`` is the position of ``wall_ms`` inside the window (1 = newest). Without ``text`` the
-        newest ``limit`` events are returned in chronological order.
+        newest ``limit`` events are returned in chronological order. ``types`` restricts events to those
+        event types (minute summaries carry no type and are omitted when it is given); ``dedupe`` keeps
+        one event per (stream, type, tracked object).
         """
+        if not 0.0 <= recency_weight <= 1.0:
+            raise ValueError("recency_weight must be in [0, 1]")
         if until_ms <= since_ms:
             return SearchResult()
         span = float(until_ms - since_ms)
@@ -292,24 +319,33 @@ class MemoryStore:
 
         if text is None or not text.strip():
             with self._lock:
-                rows = self._events_rows(stream_id, since_ms, until_ms)
-                srows = self._summary_rows(stream_id, since_ms, until_ms)
+                rows = self._events_rows(stream_id, since_ms, until_ms, types)
+                srows = [] if types else self._summary_rows(stream_id, since_ms, until_ms)
             truncated = len(rows) > limit
             rows = rows[-limit:] if truncated else rows
+            events = [self._row_event(r) for r in rows]
+            # warm vectors for the events we just listed so a follow-up text query is cheap
+            asyncio.ensure_future(self.embed_pending())
             return SearchResult(
-                [self._row_event(r) for r in rows], [self._row_summary(r) for r in srows[-limit:]], truncated
+                _dedupe(events) if dedupe else events,
+                [self._row_summary(r) for r in srows[-limit:]],
+                truncated,
             )
 
         await self.embed_pending()
         q = (await self.embedder.embed([text]))[0]
         with self._lock:
-            rows = self._events_rows(stream_id, since_ms, until_ms)
-            srows = self._summary_rows(stream_id, since_ms, until_ms)
+            rows = self._events_rows(stream_id, since_ms, until_ms, types)
+            srows = [] if types else self._summary_rows(stream_id, since_ms, until_ms)
             cos = self._knn("events_vec", [int(r["rowid"]) for r in rows[-_MAX_CANDIDATES:]], q)
             scos = self._knn("summaries_vec", [int(r["rid"]) for r in srows[-_MAX_CANDIDATES:]], q)
         scored = sorted(
             (
-                (W_COS * cos.get(int(r["rowid"]), 0.0) + W_RECENCY * recency(r["wall_ms"]), r)
+                (
+                    (1 - recency_weight) * cos.get(int(r["rowid"]), 0.0)
+                    + recency_weight * recency(r["wall_ms"]),
+                    r,
+                )
                 for r in rows
                 if int(r["rowid"]) in cos
             ),
@@ -319,18 +355,24 @@ class MemoryStore:
         top = scored[:limit]
         sscored = sorted(
             (
-                (W_COS * scos.get(int(r["rid"]), 0.0) + W_RECENCY * recency(r["wall_ms"]), r)
+                (
+                    (1 - recency_weight) * scos.get(int(r["rid"]), 0.0)
+                    + recency_weight * recency(r["wall_ms"]),
+                    r,
+                )
                 for r in srows
                 if int(r["rid"]) in scos
             ),
             key=lambda x: -x[0],
         )[:limit]
-        events = [self._row_event(r) for _, r in top]  # ranked best-first
+        ranked = [self._row_event(r) for _, r in top]  # ranked best-first
+        events = _dedupe(ranked) if dedupe else ranked
+        kept = {e.id for e in events}
         return SearchResult(
             events,
             [self._row_summary(r) for _, r in sscored],
             truncated,
-            {e.id: round(s, 6) for (s, _), e in zip(top, events, strict=True)},
+            {e.id: round(s, 6) for (s, _), e in zip(top, ranked, strict=True) if e.id in kept},
         )
 
     # -------------------------------------------------------- retention

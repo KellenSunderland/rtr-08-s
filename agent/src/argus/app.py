@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from argus.conversation.session import FrameSourceFactory, Session, SessionDeps
-from argus.memory.store import MemoryStore
+from argus.memory.store import W_RECENCY, MemoryStore
 from argus.metrics import Metrics
 from argus.perception.sanitize import GLOBAL as GLOBAL_SANITIZER
 from argus.protocol import STREAM_ID_RE, ErrorMessage, ScenarioEventType, ScenarioInfo
@@ -135,12 +135,24 @@ def create_app(
         stream_id: Annotated[str | None, Query(max_length=64)] = None,
         q: Annotated[str | None, Query(max_length=500)] = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        recency_weight: Annotated[float, Query(ge=0, le=1)] = W_RECENCY,
+        types: Annotated[list[str] | None, Query(max_length=16)] = None,
+        dedupe: bool = False,
     ) -> dict[str, Any]:
         if stream_id is not None and not STREAM_ID_RE.match(stream_id):
             raise HTTPException(400, "invalid stream_id")
         if until_ms < since_ms:
             raise HTTPException(400, "until_ms < since_ms")
-        r = await store.search(stream_id, since_ms=since_ms, until_ms=until_ms, text=q, limit=limit)
+        r = await store.search(
+            stream_id,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            text=q,
+            limit=limit,
+            recency_weight=recency_weight,
+            types=types,
+            dedupe=dedupe,
+        )
         return {
             "events": [e.wire() for e in r.events],
             "summaries": [x.wire() for x in r.summaries],

@@ -103,3 +103,41 @@ async def test_compactor_keeps_high_severity(store, providers, packs):
     assert [m.minute_start_ms for m in made] == [60_000]
     r = await store.search("cam", since_ms=0, until_ms=2_000_000)
     assert len(r.summaries) == 2
+
+
+async def test_recency_weight_shifts_ranking(store):
+    store.add_events([mk("dog eating", 0), mk("dog eating at the bowl", 100_000)])
+    new = await store.search(None, since_ms=0, until_ms=2_000_000, text="dog eating", recency_weight=1.0)
+    assert new.events[0].ts_ms == 100_000
+    old = await store.search(None, since_ms=0, until_ms=2_000_000, text="dog eating", recency_weight=0.0)
+    assert old.events[0].summary == "dog eating"  # exact text match wins when recency is ignored
+    with pytest.raises(ValueError):
+        await store.search(None, since_ms=0, until_ms=1, text="x", recency_weight=1.5)
+
+
+async def test_type_filter_omits_summaries(store):
+    store.add_events([mk("dog eats", 1000, type_="dog.eating"), mk("door", 2000, type_="person.at_door")])
+    s = MinuteSummary(stream_id="cam", minute_start_ms=0, wall_ms=1_000_500, text="s", event_count=2)
+    store.add_summary(s)
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, types=["person.at_door"])
+    assert [e.type for e in r.events] == ["person.at_door"] and r.summaries == []
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, text="dog", types=["dog.eating", "x.y"])
+    assert [e.type for e in r.events] == ["dog.eating"]
+    r = await store.search(None, since_ms=0, until_ms=2_000_000)
+    assert len(r.events) == 2 and len(r.summaries) == 1
+
+
+async def test_dedupe_keeps_best_ranked_per_track(store):
+    def tracked(summary, ts, track):
+        e = mk(summary, ts, type_="dog.eating")
+        e.attrs["track"] = {"id": track}
+        return e
+
+    store.add_events(
+        [tracked("dog eating", 1000, 1), tracked("dog eating again", 90_000, 1), tracked("dog", 5000, 2)]
+    )
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, text="dog eating", dedupe=True)
+    assert len(r.events) == 2 and set(r.scores) == {e.id for e in r.events}
+    assert sum(1 for e in r.events if e.attrs["track"]["id"] == 1) == 1
+    r = await store.search(None, since_ms=0, until_ms=2_000_000, text="dog eating")
+    assert len(r.events) == 3
