@@ -13,7 +13,8 @@ import (
 	"sync"
 )
 
-// Principal is an authenticated token holder.
+// Principal is an authenticated bearer-token holder together with its quota limits and
+// current usage.
 type Principal struct {
 	Name        string
 	MaxStreams  int
@@ -24,7 +25,7 @@ type Principal struct {
 	sessions int
 }
 
-// Kind of quota.
+// Kind identifies which per-token quota is being acquired or released.
 type Kind int
 
 const (
@@ -32,7 +33,8 @@ const (
 	Sessions
 )
 
-// Acquire reserves one unit; false if over quota (limit <= 0 means unlimited).
+// Acquire reserves one unit of quota k. It returns false, without reserving anything, when the
+// limit has already been reached (a limit <= 0 means unlimited).
 func (p *Principal) Acquire(k Kind) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -51,7 +53,7 @@ func (p *Principal) Acquire(k Kind) bool {
 	return true
 }
 
-// Release returns one unit.
+// Release gives back one unit of quota k. A counter never drops below zero.
 func (p *Principal) Release(k Kind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -62,7 +64,7 @@ func (p *Principal) Release(k Kind) {
 	}
 }
 
-// Usage returns current counts.
+// Usage returns the number of streams and sessions currently held by this principal.
 func (p *Principal) Usage() (streams, sessions int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

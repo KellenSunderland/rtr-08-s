@@ -1,5 +1,7 @@
-"""Minute compaction: one ChatModel summary per (stream, closed minute); high-severity events are
-kept verbatim in the summary text."""
+"""Minute compaction: writes one ChatModel-generated summary per (stream, closed minute).
+
+High-severity events are quoted verbatim in the summary text.
+"""
 
 from __future__ import annotations
 

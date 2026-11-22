@@ -1,7 +1,8 @@
 """Strip instruction-like text from perception summaries before it can reach a ChatModel context.
 
-On-screen text (signs, shirts, monitors) is attacker-controlled. Vision summaries may quote it, so
-we drop any sentence that looks like an instruction to the assistant and count how often we do.
+On-screen text (signs, shirts, monitors) is attacker-controlled, and vision summaries may quote it.
+We therefore drop any sentence that looks like an instruction to the assistant, and count how often
+that happens.
 """
 
 from __future__ import annotations

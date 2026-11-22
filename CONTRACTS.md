@@ -3,7 +3,7 @@
 Argus is a real-time video-understanding assistant you can talk to. Four components,
 one monorepo. This file is the integration contract; the files it points at are the
 source of truth. Builders of each component must implement exactly these interfaces
-and may not change them without updating this file.
+and must update this file in the same change if they alter one.
 
 ```
 console (TS, browser)  ──WS/REST──▶  gateway (Go)  ──cgo──▶  mediacore (C++)
@@ -59,10 +59,11 @@ to the workspace and must have 100% schema coverage tests.
 
 ## Cross-cutting rules
 
-- **Clocks**: monotonic for durations, wall for retention/display. Each component keeps
-  both; never derive one from the other after the fact.
-- **Backpressure**: frame paths drop (never queue unbounded); audio paths use the
-  jitter buffer / ring with drop counters surfaced in `stream.status`/metrics.
+- **Clocks**: use the monotonic clock for durations and the wall clock for retention and
+  display. Each component keeps both; never derive one from the other after the fact (a wall
+  timestamp minus a monotonic one is meaningless).
+- **Backpressure**: frame paths drop frames rather than queue without bound; audio paths use
+  the jitter buffer or ring, with drop counters surfaced in `stream.status` and metrics.
 - **Security baseline** (builders must implement; the benchmark will later plant
   violations): stream URIs validated against scheme/host allow-list; file URIs
   confined to media root (no `..`); clip export paths confined; transcripts never
