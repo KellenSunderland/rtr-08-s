@@ -170,6 +170,25 @@ typedef struct mc_frame_store_stats {
 
 MC_API mc_status mc_frame_store_stats_get(mc_frame_store* store, mc_frame_store_stats* out);
 
+typedef struct mc_stream_stats {
+    size_t frames;
+    size_t bytes;
+    size_t leased_frames;     /* frames currently held by an outstanding lease */
+    int64_t oldest_ts_ns;     /* 0 if empty */
+    int64_t newest_ts_ns;     /* 0 if empty */
+    size_t window_frames;     /* frames with now_ns - window_ns <= ts_ns < now_ns */
+    size_t expiring_frames;   /* frames a prune at now_ns would drop by retention, i.e.
+                                 ts_ns < now_ns - retention_ns (leases ignored) */
+    uint64_t evicted_total;   /* retention + size evictions for this stream */
+    uint64_t thinned_total;
+    uint64_t store_queries;   /* stream_stats calls served by the store so far */
+} mc_stream_stats;
+
+/* Per-stream statistics as of `now_ns`. MC_ERR_NOT_FOUND if the stream is unknown. */
+MC_API mc_status mc_frame_store_stream_stats(mc_frame_store* store, uint32_t stream_id,
+                                             int64_t now_ns, int64_t window_ns,
+                                             mc_stream_stats* out);
+
 /* --------------------------------------------------------- capture */
 
 typedef struct mc_capture mc_capture;
