@@ -4,7 +4,8 @@ import { SessionClock } from "./lib/clock";
 import { AudioPlayer } from "./lib/audio/player";
 import { Mic } from "./lib/audio/mic";
 import { initialSessionState, sessionReducer } from "./lib/sessionState";
-import { ArgusSocket, type SocketStatus } from "./lib/ws";
+import { connectionManager } from "./lib/connection";
+import type { SocketStatus } from "./lib/ws";
 import { WINDOW_MS } from "./lib/timeline";
 
 export function useSession(api: ApiClient) {
@@ -13,7 +14,7 @@ export function useSession(api: ApiClient) {
   const [error, setError] = useState<string | null>(null);
   const [talking, setTalking] = useState(false);
   const clock = useMemo(() => new SessionClock(), []);
-  const sock = useRef<ArgusSocket | null>(null);
+  const unsubs = useRef<Array<() => void>>([]);
   const sessionId = useRef<string | null>(null);
   const player = useRef<AudioPlayer | null>(null);
   const mic = useRef<Mic | null>(null);
@@ -22,9 +23,10 @@ export function useSession(api: ApiClient) {
   const reqN = useRef(0);
 
   const stop = useCallback(async () => {
-    sock.current?.send({ type: "control.stop" });
-    sock.current?.close();
-    sock.current = null;
+    connectionManager.send({ type: "control.stop" });
+    unsubs.current.forEach((off) => off());
+    unsubs.current = [];
+    connectionManager.disconnect();
     await mic.current?.stop();
     await player.current?.dispose();
     player.current = null;
@@ -46,7 +48,7 @@ export function useSession(api: ApiClient) {
         player.current = new AudioPlayer();
         mic.current = new Mic({
           onChunk: (pcm16_b64) => {
-            sock.current?.send({
+            connectionManager.send({
               type: "audio.chunk",
               seq: seq.current++,
               ts_ms: clock.ms(),
@@ -55,37 +57,37 @@ export function useSession(api: ApiClient) {
             });
           },
         });
-        const s = new ArgusSocket({ url: () => api.wsUrl(info.id), scenario, streamIds });
-        sock.current = s;
-        s.on("status", setStatus);
-        s.on("message", (msg) => {
-          dispatch({ type: "server", msg });
-          switch (msg.type) {
-            case "session.started": {
-              clock.start();
-              const wallNow = Date.now();
-              s.send({
-                type: "history.query",
-                request_id: `seed-${++reqN.current}`,
-                since_ms: wallNow - WINDOW_MS, // wall-clock epoch ms (CONTRACTS clarification)
-                until_ms: wallNow,
-                limit: 200,
-              });
-              break;
+        unsubs.current.push(connectionManager.on("status", (i) => setStatus(i.status)));
+        unsubs.current.push(
+          connectionManager.on("message", (msg) => {
+            dispatch({ type: "server", msg });
+            switch (msg.type) {
+              case "session.started": {
+                clock.start();
+                const wallNow = Date.now();
+                connectionManager.send({
+                  type: "history.query",
+                  request_id: `seed-${++reqN.current}`,
+                  since_ms: wallNow - WINDOW_MS, // wall-clock epoch ms (CONTRACTS clarification)
+                  until_ms: wallNow,
+                  limit: 200,
+                });
+                break;
+              }
+              case "assistant.audio":
+                player.current?.enqueue(msg);
+                break;
+              case "assistant.cancelled":
+                player.current?.cancel(msg.utterance_id);
+                break;
+              case "transcript.partial":
+                // Auto barge-in: the user started talking while the assistant was audible.
+                if (player.current?.isPlaying) player.current.flush();
+                break;
             }
-            case "assistant.audio":
-              player.current?.enqueue(msg);
-              break;
-            case "assistant.cancelled":
-              player.current?.cancel(msg.utterance_id);
-              break;
-            case "transcript.partial":
-              // Auto barge-in: the user started talking while the assistant was audible.
-              if (player.current?.isPlaying) player.current.flush();
-              break;
-          }
-        });
-        s.connect();
+          }),
+        );
+        connectionManager.connect(() => api.wsUrl(info.id), scenario, streamIds);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         sessionId.current = null;
@@ -99,13 +101,13 @@ export function useSession(api: ApiClient) {
   const sendText = useCallback((text: string) => {
     const t = text.trim();
     if (!t) return;
-    if (sock.current?.send({ type: "text.message", text: t })) {
+    if (connectionManager.send({ type: "text.message", text: t })) {
       dispatch({ type: "local.user_text", text: t, key: `local:${Date.now()}:${Math.random()}` });
     }
   }, []);
   const bargeIn = useCallback(() => {
     player.current?.flush();
-    sock.current?.send({ type: "control.barge_in" });
+    connectionManager.send({ type: "control.barge_in" });
   }, []);
   const pttStart = useCallback(async () => {
     talkingRef.current = true;

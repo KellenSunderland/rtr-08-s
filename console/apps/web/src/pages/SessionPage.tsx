@@ -5,6 +5,7 @@ import { useInterval } from "../hooks";
 import { useSession } from "../useSession";
 import { FrameTile } from "../components/FrameTile";
 import { Transcript } from "../components/Transcript";
+import { ConnectionBadge } from "../components/ConnectionBadge";
 import { Timeline } from "../components/Timeline";
 import { EventList } from "../components/EventList";
 import { ScenarioPanel } from "../components/ScenarioPanel";
@@ -63,7 +64,7 @@ export function SessionPage() {
             End session
           </button>
         )}
-        <span className="muted">connection: {sess.status}</span>
+        <ConnectionBadge />
       </div>
       {sess.error && <p className="err">{sess.error}</p>}
       {state.errors.length > 0 && <p className="err small">{state.errors[state.errors.length - 1]}</p>}
