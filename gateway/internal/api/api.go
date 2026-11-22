@@ -3,6 +3,7 @@ package api
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -330,6 +332,14 @@ func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(jpg)
 }
 
+// clipReq is a validated clip window.
+type clipReq struct {
+	from, to int64
+	fps      float64
+	maxW     int
+	origin   int64
+}
+
 type clipEntry struct {
 	File   string `json:"file"`
 	TsMs   int64  `json:"ts_ms"`
@@ -344,6 +354,10 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 	from, hf, ok1 := intParam(r, "from_ms")
 	to, ht, ok2 := intParam(r, "to_ms")
 	maxW, ok3 := maxWParam(r)
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "zip"
+	}
 	fps := 2.0
 	if v := r.URL.Query().Get("fps"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -355,6 +369,9 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case !hf || !ht || !ok1 || !ok2 || !ok3:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "from_ms and to_ms are required integers; fps and max_w must be valid")
+		return
+	case format != "zip" && format != "json" && format != "mjpeg":
+		auth.WriteError(w, 400, protocol.CodeBadRequest, "format must be zip, json or mjpeg")
 		return
 	case from < 0 || to <= from:
 		auth.WriteError(w, 400, protocol.CodeBadRequest, "require 0 <= from_ms < to_ms")
@@ -371,20 +388,101 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := s.Streams.Media()
-	fromNs, toNs := origin+from*1e6, origin+to*1e6
-	if first, _, err := m.Range(st.Idx, fromNs, toNs, 1); err != nil || len(first) == 0 {
+	if first, _, err := m.Range(st.Idx, origin+from*1e6, origin+to*1e6, 1); err != nil || len(first) == 0 {
 		auth.WriteError(w, 404, protocol.CodeNotFound, "no frames in range")
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.zip"`, st.ID, from, to))
-	zw := zip.NewWriter(w)
-	stepNs := int64(1e9 / fps)
+	c := clipReq{from: from, to: to, fps: fps, maxW: maxW, origin: origin}
+	index := func(entries []clipEntry) map[string]any {
+		return map[string]any{"stream_id": st.ID, "from_ms": from, "to_ms": to, "fps": fps, "frames": entries}
+	}
+	var entries []clipEntry
+	switch format {
+	case "zip":
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.zip"`, st.ID, from, to))
+		zw := zip.NewWriter(w)
+		err := s.walkClip(r.Context(), st, c, func(e clipEntry, f media.Frame) error {
+			jpg, err := m.EncodeJPEG(f, jpegQuality)
+			if err != nil {
+				return errSkipFrame
+			}
+			fw, err := zw.CreateHeader(&zip.FileHeader{Name: e.File, Method: zip.Store})
+			if err != nil {
+				return err
+			}
+			if _, err := fw.Write(jpg); err != nil {
+				return err
+			}
+			entries = append(entries, e)
+			return nil
+		})
+		if err != nil {
+			return
+		}
+		if fw, err := zw.Create("index.json"); err == nil {
+			_ = json.NewEncoder(fw).Encode(index(entries))
+		}
+		_ = zw.Close()
+	case "json":
+		// Index only: timestamps of the frames the clip would contain, no pixels.
+		err := s.walkClip(r.Context(), st, c, func(e clipEntry, _ media.Frame) error {
+			entries = append(entries, e)
+			return nil
+		})
+		if err != nil {
+			return
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.json"`, st.ID, from, to))
+		writeJSON(w, 200, index(entries))
+	case "mjpeg":
+		// TODO: add a webm/h264 variant for browsers that cannot play multipart streams
+		tmp, err := os.CreateTemp("", "argus-clip-*.mjpeg")
+		if err != nil {
+			auth.WriteError(w, 500, protocol.CodeInternal, "internal error")
+			return
+		}
+		defer os.Remove(tmp.Name())
+		defer tmp.Close()
+		// jpg, err := m.EncodeJPEG(f, jpegQuality)
+		// if err != nil {
+		// 	return errSkipFrame
+		// }
+		// w.Write(jpg)
+		err = s.walkClip(r.Context(), st, c, func(e clipEntry, f media.Frame) error {
+			jpg, err := m.EncodeJPEG(f, jpegQuality)
+			if err != nil {
+				return errSkipFrame
+			}
+			return writeMJPEGPart(tmp, jpg, e)
+		})
+		if err != nil {
+			auth.WriteError(w, 500, protocol.CodeInternal, "internal error")
+			return
+		}
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+mjpegBoundary)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%d-%d.mjpeg"`, st.ID, from, to))
+		http.ServeContent(w, r, "", time.Time{}, tmp)
+	}
+}
+
+// errSkipFrame tells walkClip to drop the current frame and continue.
+var errSkipFrame = errors.New("skip frame")
+
+const mjpegBoundary = "argusframe"
+
+// walkClip visits the frames sampled for the clip window, oldest first, scaled
+// to c.maxW. visit may return errSkipFrame to omit a frame; any other error
+// stops the walk.
+func (s *Server) walkClip(ctx context.Context, st *streams.Stream, c clipReq, visit func(clipEntry, media.Frame) error) error {
+	m := s.Streams.Media()
+	fromNs, toNs := c.origin+c.from*1e6, c.origin+c.to*1e6
+	stepNs := int64(1e9 / c.fps)
 	half := stepNs / 2
 	if half < 1 {
 		half = 1
 	}
-	var entries []clipEntry
+	n := 0
 	var lastTs int64 = -1
 	for t := fromNs; t < toNs; t += stepNs {
 		f, err := m.Nearest(st.Idx, t, half)
@@ -392,31 +490,37 @@ func (s *Server) getClip(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		lastTs = f.TsNs
-		sf, err := scaled(m, f, maxW)
+		sf, err := scaled(m, f, c.maxW)
 		if err != nil {
 			continue
 		}
-		jpg, err := m.EncodeJPEG(sf, jpegQuality)
-		if err != nil {
+		e := clipEntry{fmt.Sprintf("frames/%06d.jpg", n+1), (f.TsNs - c.origin) / 1e6, f.WallNs / 1e6}
+		switch err := visit(e, sf); {
+		case errors.Is(err, errSkipFrame):
 			continue
+		case err != nil:
+			return err
 		}
-		name := fmt.Sprintf("frames/%06d.jpg", len(entries)+1)
-		fw, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-		if err != nil {
-			return
-		}
-		if _, err := fw.Write(jpg); err != nil {
-			return
-		}
-		entries = append(entries, clipEntry{name, (f.TsNs - origin) / 1e6, f.WallNs / 1e6})
-		if r.Context().Err() != nil {
-			return
+		n++
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
-	if fw, err := zw.Create("index.json"); err == nil {
-		_ = json.NewEncoder(fw).Encode(map[string]any{"stream_id": st.ID, "from_ms": from, "to_ms": to, "fps": fps, "frames": entries})
+	return nil
+}
+
+// writeMJPEGPart appends one multipart part (a JPEG with its clip timestamps).
+func writeMJPEGPart(f *os.File, jpg []byte, e clipEntry) error {
+	hdr := fmt.Sprintf("--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\nX-Ts-Ms: %d\r\nX-Wall-Ms: %d\r\n\r\n",
+		mjpegBoundary, len(jpg), e.TsMs, e.WallMs)
+	if _, err := f.WriteString(hdr); err != nil {
+		return err
 	}
-	_ = zw.Close()
+	if _, err := f.Write(jpg); err != nil {
+		return err
+	}
+	_, err := f.WriteString("\r\n")
+	return err
 }
 
 // ---- sessions
