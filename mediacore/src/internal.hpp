@@ -58,6 +58,8 @@ void letterbox(const mc_frame* in, int32_t w, int32_t h, uint8_t pad, mc_frame* 
 void to_gray(const mc_frame* in, mc_frame* out);
 void convert(const mc_frame* in, mc_pixfmt fmt, mc_frame* out);
 void crop(const mc_frame* in, int32_t x, int32_t y, int32_t w, int32_t h, mc_frame* out);
+void crop_letterbox(const mc_frame* in, int32_t cx, int32_t cy, int32_t cw, int32_t ch, int32_t w,
+                    int32_t h, uint8_t pad, mc_frame* out);
 double motion_score(const mc_frame* a, const mc_frame* b);
 double changed_fraction(const mc_frame* a, const mc_frame* b, uint8_t threshold);
 uint8_t* encode_jpeg(const mc_frame* in, int32_t quality, size_t* len);

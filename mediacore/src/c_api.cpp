@@ -106,6 +106,11 @@ mc_status mc_convert(const mc_frame* in, mc_pixfmt fmt, mc_frame* out) {
 mc_status mc_crop(const mc_frame* in, int32_t x, int32_t y, int32_t w, int32_t h, mc_frame* out) {
   return guard([&] { mediacore::crop(in, x, y, w, h, out); });
 }
+mc_status mc_crop_letterbox(const mc_frame* in, int32_t x, int32_t y, int32_t w, int32_t h,
+                            int32_t width, int32_t height, uint8_t pad_value, mc_frame* out) {
+  return guard(
+      [&] { mediacore::crop_letterbox(in, x, y, w, h, width, height, pad_value, out); });
+}
 mc_status mc_motion_score(const mc_frame* a, const mc_frame* b, double* score) {
   return guard([&] { *need(score, "score") = mediacore::motion_score(a, b); });
 }
