@@ -166,6 +166,7 @@ func (s *Server) registerMetrics() {
 			fmt.Fprintf(w, "argus_gateway_stream_frames_total{stream=%q} %d\n", st.ID, st.Frames())
 			fmt.Fprintf(w, "argus_gateway_stream_dropped_frames_total{stream=%q} %d\n", st.ID, st.Dropped())
 		}
+		fmt.Fprintf(w, "# TYPE argus_gateway_streams_stalled gauge\nargus_gateway_streams_stalled %d\n", s.Streams.Stalled())
 		fmt.Fprintln(w, "# TYPE argus_gateway_streams gauge")
 		for _, state := range []protocol.StreamState{"starting", "live", "stalled", "stopped", "error"} {
 			fmt.Fprintf(w, "argus_gateway_streams{state=%q} %d\n", state, counts[state])

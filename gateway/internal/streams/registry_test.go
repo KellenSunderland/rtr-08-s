@@ -130,3 +130,41 @@ func TestSlowSubscriberNeverBlocksCapture(t *testing.T) {
 		t.Fatal("expected drops for the slow subscriber")
 	}
 }
+
+func TestSlowStreamNotStalledEarly(t *testing.T) {
+	r := newReg(t)
+	r.StallAfter = 100 * time.Millisecond
+	s, err := r.Create(nil, "slow", "", "fake://8x8@2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, protocol.StateLive, 2*time.Second)
+	for deadline := time.Now().Add(2 * time.Second); s.Info().FPS == nil && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond) // fps is only known after the second frame
+	}
+	time.Sleep(250 * time.Millisecond) // > StallAfter, < 4 frame intervals
+	r.CheckStalls()
+	if st := s.State(); st != protocol.StateLive {
+		t.Fatalf("state %s, want live", st)
+	}
+	if r.Stalled() != 0 {
+		t.Fatalf("stalled gauge %d", r.Stalled())
+	}
+}
+
+func TestInfoReportsHealth(t *testing.T) {
+	r := newReg(t)
+	s, err := r.Create(nil, "cam1", "", "fake://16x16@50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, protocol.StateLive, 2*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	info := s.Info()
+	if info.FramesTotal == 0 || info.StoredFrames == nil || *info.StoredFrames == 0 {
+		t.Fatalf("missing counters: %+v", info)
+	}
+	if info.LastFrameAgeMs == nil || *info.LastFrameAgeMs < 0 || *info.LastFrameAgeMs > 1000 {
+		t.Fatalf("bad age: %+v", info)
+	}
+}

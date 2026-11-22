@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/argus-video/argus/gateway/internal/auth"
@@ -63,6 +64,8 @@ type Registry struct {
 	nextIdx uint32
 	closed  bool
 
+	stalled atomic.Int32 // number of streams currently stalled (gauge)
+
 	wmu      sync.Mutex
 	watchers map[int]chan protocol.StreamInfo
 	nextW    int
@@ -106,6 +109,39 @@ func (r *Registry) Start(ctx context.Context) {
 	}()
 }
 
+// Stalled returns the number of streams currently in the stalled state.
+func (r *Registry) Stalled() int { return int(r.stalled.Load()) }
+
+// refreshStalled recounts stalled streams for the stalled-streams gauge.
+func (r *Registry) refreshStalled() {
+	r.mu.Lock()
+	all := make([]*Stream, 0, len(r.streams))
+	for _, s := range r.streams {
+		all = append(all, s)
+	}
+	r.mu.Unlock()
+	var n int32
+	for _, s := range all {
+		if s.State() == protocol.StateStalled {
+			n++
+		}
+	}
+	r.stalled.Store(n)
+}
+
+// stallThreshold is how long without a frame counts as a stall. Slow sources
+// (e.g. 1 fps) legitimately go several seconds between frames, so the base
+// threshold is stretched to four frame intervals when that is longer.
+// Caller holds s.mu.
+func (s *Stream) stallThreshold(base time.Duration) time.Duration {
+	if s.fps > 0 {
+		if iv := time.Duration(4 * float64(time.Second) / s.fps); iv > base {
+			return iv
+		}
+	}
+	return base
+}
+
 // CheckStalls marks live streams with no recent frame as stalled.
 func (r *Registry) CheckStalls() {
 	r.mu.Lock()
@@ -116,7 +152,7 @@ func (r *Registry) CheckStalls() {
 	r.mu.Unlock()
 	for _, s := range all {
 		s.mu.Lock()
-		stalled := s.state == protocol.StateLive && time.Since(s.lastMono) > r.StallAfter
+		stalled := s.state == protocol.StateLive && time.Since(s.lastMono) > s.stallThreshold(r.StallAfter)
 		if stalled {
 			s.state = protocol.StateStalled
 		}
@@ -125,6 +161,7 @@ func (r *Registry) CheckStalls() {
 			r.notify(s)
 		}
 	}
+	r.refreshStalled()
 }
 
 // Create validates the URI, reserves quota and starts the capture goroutine.
@@ -297,7 +334,13 @@ func (s *Stream) Info() protocol.StreamInfo {
 	if s.lastWall > 0 {
 		w := s.lastWall / 1e6
 		info.LastFrameWallMs = &w
+		age := time.Since(time.Unix(0, s.lastWall)).Milliseconds()
+		info.LastFrameAgeMs = &age
 	}
+	info.FramesTotal, info.DroppedFrames = s.frames, s.dropped
+	st, _ := s.r.m.Stats()
+	stored := st.Frames
+	info.StoredFrames = &stored
 	return info
 }
 
@@ -389,6 +432,7 @@ func (s *Stream) onFrame(f media.Frame) {
 	if changed {
 		s.r.notify(s)
 	}
+	s.r.refreshStalled()
 }
 
 // Done is closed when the capture goroutine has exited.

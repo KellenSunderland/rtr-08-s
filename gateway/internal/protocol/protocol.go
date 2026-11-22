@@ -80,6 +80,12 @@ type StreamInfo struct {
 	State           StreamState `json:"state"`
 	FPS             *float64    `json:"fps,omitempty"`
 	LastFrameWallMs *int64      `json:"last_frame_wall_ms,omitempty"`
+
+	// Per-stream health (additive; absent until the first frame).
+	LastFrameAgeMs *int64 `json:"last_frame_age_ms,omitempty"`
+	FramesTotal    uint64 `json:"frames_total,omitempty"`
+	DroppedFrames  uint64 `json:"dropped_frames,omitempty"`
+	StoredFrames   *int   `json:"stored_frames,omitempty"`
 }
 
 // AudioChunk fields shared by audio.chunk and assistant.audio.
