@@ -1,7 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { renderMarkdown } from "../lib/markdown";
 import type { TranscriptEntry } from "../lib/sessionState";
 
-/** All text is rendered as React text nodes (escaped); never as HTML. */
+/** Renders the markdown subset from `renderMarkdown` (links, bold, inline code) into a span. */
+function RichText({ text }: { text: string }) {
+  const el = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    if (el.current) el.current.innerHTML = renderMarkdown(text);
+  }, [text]);
+  return <span ref={el} />;
+}
+
 export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => end.current?.scrollIntoView?.({ block: "nearest" }), [entries]);
@@ -15,7 +24,7 @@ export function Transcript({ entries }: { entries: TranscriptEntry[] }) {
             key={t.key}
             className={`utt utt-${t.role}${t.partial ? " partial" : ""}${t.cancelled ? " cancelled" : ""}`}
           >
-            <b>{t.role === "user" ? "You" : "Argus"}:</b> {t.text}
+            <b>{t.role === "user" ? "You" : "Argus"}:</b> <RichText text={t.text} />
             {t.partial && <i> …</i>}
             {t.cancelled && <i> (interrupted)</i>}
           </p>

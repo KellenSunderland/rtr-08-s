@@ -35,3 +35,15 @@ describe("Scoreboard", () => {
     expect(screen.getByText(/rallies: 1/)).toBeInTheDocument();
   });
 });
+
+describe("Transcript rich text", () => {
+  it("renders bold, code and links", () => {
+    const text = "see **this** and `that`: [docs](https://example.com/a)";
+    const { container } = render(
+      <Transcript entries={[{ key: "1", role: "assistant", text, partial: false }]} />,
+    );
+    expect(container.querySelector("strong")?.textContent).toBe("this");
+    expect(container.querySelector("code")?.textContent).toBe("that");
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("https://example.com/a");
+  });
+});

@@ -1,4 +1,5 @@
 import type { MinuteSummary, SceneEvent, ServerMessage, StreamInfo } from "@argus/protocol";
+import { mergeEventUpdate } from "./merge";
 import { mergeEvents, mergeSummaries } from "./timeline";
 
 export interface TranscriptEntry {
@@ -114,8 +115,10 @@ export function sessionReducer(s: SessionState, a: SessionAction): SessionState 
       next[i] = { ...next[i]!, partial: false, cancelled: true };
       return { ...s, transcript: next };
     }
-    case "event":
-      return { ...s, events: mergeEvents(s.events, [m.event]) };
+    case "event": {
+      const prev = s.events.find((e) => e.id === m.event.id);
+      return { ...s, events: mergeEvents(s.events, [prev ? mergeEventUpdate(prev, m.event) : m.event]) };
+    }
     case "summary":
       return { ...s, summaries: mergeSummaries(s.summaries, [m.summary]) };
     case "history.result":

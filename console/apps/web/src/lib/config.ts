@@ -4,9 +4,11 @@ export interface Config {
   scenario: string;
 }
 const KEY = "argus.console.config";
+/** Used when no token is saved or injected via VITE_GATEWAY_TOKEN, so `pnpm dev` works out of the box. */
+const DEV_DEFAULT_TOKEN = "argus-dev-2f9b7c41d8e65a03b1c7";
 export const DEFAULT_CONFIG: Config = {
   baseUrl: (import.meta.env.VITE_GATEWAY_URL as string | undefined) ?? "http://localhost:8080",
-  token: "dev-token",
+  token: (import.meta.env.VITE_GATEWAY_TOKEN as string | undefined) ?? DEV_DEFAULT_TOKEN,
   scenario: "",
 };
 
